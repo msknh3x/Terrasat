@@ -1,13 +1,109 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactGlobe from 'react-globe.gl'
 import * as THREE from 'three'
-import { solarPoint } from './globeSolar.js'
+import { dayNightView, solarPoint } from './globeSolar.js'
 
-const CDN = 'https://unpkg.com/three-globe@2.45.6/example'
+const DAY_MAP = `${import.meta.env.BASE_URL}earth-surface.webp`
+const NIGHT_MAP = `${import.meta.env.BASE_URL}earth-night-lights.webp`
 const BORDERS = 'https://raw.githubusercontent.com/vasturiano/react-globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson'
-const HOME_VIEW = { lat: 28, lng: 68, altitude: 1.82 }
 const SELECTED_ALTITUDE = 1.62
 const RENDERER_OPTIONS = { alpha: true, antialias: true, powerPreference: 'default' }
+const SPHERE_VERTEX = `
+  varying vec2 mapUv;
+  varying vec3 worldNormal;
+  varying vec3 worldPoint;
+
+  void main() {
+    mapUv = uv;
+    worldNormal = mat3(modelMatrix) * normal;
+    worldPoint = (modelMatrix * vec4(position, 1.0)).xyz;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+const SURFACE_FRAGMENT = `
+  uniform sampler2D dayMap;
+  uniform sampler2D nightMap;
+  uniform sampler2D cloudMap;
+  uniform bool hasNight;
+  uniform bool hasClouds;
+  uniform vec3 sunDirection;
+  varying vec2 mapUv;
+  varying vec3 worldNormal;
+  varying vec3 worldPoint;
+
+  void main() {
+    vec3 normal = normalize(worldNormal);
+    vec3 view = normalize(cameraPosition - worldPoint);
+    float incidence = dot(normal, sunDirection);
+    float sunlit = pow(max(incidence, 0.0), 0.74);
+    float twilight = smoothstep(-0.20, 0.15, incidence);
+
+    vec3 source = texture2D(dayMap, mapUv).rgb;
+    float luma = dot(source, vec3(0.2126, 0.7152, 0.0722));
+    // The atlas has a flat blue sea. Its hue and luminance distinguish water
+    // from blue-tinted snow and mountain shadows without a separate texture.
+    float water = smoothstep(0.18, 0.58, (source.b - source.r) / (source.b + 0.004))
+      * smoothstep(0.05, 0.38, (source.b - source.g) / (source.b + 0.004))
+      * (1.0 - smoothstep(0.04, 0.17, luma));
+    vec3 ocean = mix(vec3(0.0032, 0.0090, 0.0170), source, 0.23);
+    vec3 ground = mix(mix(source, vec3(luma), 0.065), ocean, water);
+    vec3 lightTint = mix(vec3(0.60, 0.76, 1.00), vec3(1.03, 1.01, 0.97), twilight);
+    vec3 color = ground * lightTint * (0.024 + 0.19 * twilight + 0.89 * sunlit);
+
+    float glint = max(0.0, dot(reflect(-sunDirection, normal), view));
+    color += water * sunlit * (0.019 * pow(glint, 26.0) + 0.015 * pow(glint, 70.0));
+
+    if (hasClouds && incidence > 0.0) {
+      // Project a slight sunward offset onto the cloud shell at local altitude.
+      vec3 shadowPoint = normalize(normal + sunDirection * 0.004 / max(incidence, 0.17));
+      vec2 shadowUv = vec2(fract(0.5 + atan(shadowPoint.x, shadowPoint.z) / 6.2831853),
+        0.5 + asin(clamp(shadowPoint.y, -1.0, 1.0)) / 3.1415927);
+      color *= 1.0 - texture2D(cloudMap, shadowUv).a * 0.16 * twilight;
+    }
+
+    if (hasNight && incidence < -0.02) {
+      float darkness = smoothstep(0.02, 0.20, -incidence);
+      // Black Marble stores settlement cores, nearby radiance, and wider glow.
+      vec3 radiance = texture2D(nightMap, mapUv).rgb;
+      float core = radiance.r * (0.55 + 0.45 * radiance.r) * 0.88;
+      float neighborhood = radiance.g * 0.46;
+      float halo = radiance.b * 0.17;
+      color += darkness * (vec3(1.0, 0.83, 0.63) * (core + neighborhood * 0.24)
+        + vec3(1.0, 0.63, 0.32) * (neighborhood * 0.76 + halo));
+    }
+
+    float rim = pow(1.0 - max(0.0, dot(normal, view)), 10.0)
+      * (0.075 + 0.925 * smoothstep(-0.11, 0.36, incidence));
+    color += vec3(0.025, 0.061, 0.112) * rim;
+    gl_FragColor = vec4(color, 1.0);
+    #include <colorspace_fragment>
+  }
+`
+const CLOUD_FRAGMENT = `
+  uniform sampler2D cloudMap;
+  uniform sampler2D nightMap;
+  uniform bool hasNight;
+  uniform vec3 sunDirection;
+  varying vec2 mapUv;
+  varying vec3 worldNormal;
+
+  void main() {
+    float coverage = texture2D(cloudMap, mapUv).a;
+    if (coverage < 0.018) discard;
+    float incidence = dot(normalize(worldNormal), sunDirection);
+    float twilight = smoothstep(-0.19, 0.14, incidence);
+    float sunlit = pow(max(incidence, 0.0), 0.64);
+    vec3 cloudLight = vec3(0.014, 0.022, 0.036)
+      + twilight * vec3(0.21, 0.25, 0.32) + sunlit * vec3(0.54, 0.51, 0.46);
+    if (hasNight && incidence < -0.02) {
+      vec2 glow = texture2D(nightMap, mapUv).gb;
+      cloudLight += vec3(1.0, 0.69, 0.36) * smoothstep(0.02, 0.20, -incidence)
+        * dot(glow, vec2(0.055, 0.027));
+    }
+    gl_FragColor = vec4(cloudLight, coverage * 0.78);
+    #include <colorspace_fragment>
+  }
+`
 
 function normalizedName(value) {
   return String(value ?? '').normalize('NFD').replace(/\p{Diacritic}/gu, '').trim().toLowerCase()
@@ -28,79 +124,19 @@ function findCountry(features, city) {
 }
 
 function makeSurface() {
-  const sun = new THREE.Vector3(0, 0, 1)
-  const material = new THREE.MeshPhongMaterial({
-    color: '#f1f2ea',
-    specular: '#383e4b',
-    shininess: 32,
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      dayMap: { value: null },
+      nightMap: { value: null },
+      cloudMap: { value: null },
+      hasNight: { value: false },
+      hasClouds: { value: false },
+      sunDirection: { value: new THREE.Vector3(0, 0, 1) },
+    },
+    vertexShader: SPHERE_VERTEX,
+    fragmentShader: SURFACE_FRAGMENT,
+    toneMapped: false,
   })
-  // Add lights from the night map only on the dark side of the same terrain.
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.fieldshiftSun = { value: sun }
-    shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 fieldshiftNormal;')
-      .replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nfieldshiftNormal = mat3(modelMatrix) * normal;')
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying vec3 fieldshiftNormal;\nuniform vec3 fieldshiftSun;')
-      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
-        float day = dot(normalize(fieldshiftNormal), fieldshiftSun);
-        totalEmissiveRadiance *= 1.0 - smoothstep(-0.19, 0.08, day);
-      `)
-  }
-  return { material, sun }
-}
-
-function makeStars() {
-  const stars = []
-  const count = 1000
-  for (let index = 0; index < count; index += 1) {
-    const y = 1 - (2 * (index + 0.5)) / count
-    const r = Math.sqrt(1 - y * y)
-    const angle = index * 2.39996323
-    stars.push(750 * r * Math.cos(angle), 750 * y, 750 * r * Math.sin(angle))
-  }
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(stars, 3))
-  const material = new THREE.PointsMaterial({
-    color: '#bdcab4', size: 0.82, sizeAttenuation: false,
-    opacity: 0.32, transparent: true, depthWrite: false, toneMapped: false,
-  })
-  return new THREE.Points(geometry, material)
-}
-
-function makeBorders(globe, features) {
-  const positions = []
-  const radius = globe.getGlobeRadius() * 1.004
-  const previous = new THREE.Vector3()
-  const next = new THREE.Vector3()
-  const point = new THREE.Vector3()
-  for (const { geometry } of features) {
-    const polygons = geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates]
-    for (const rings of polygons) {
-      for (const ring of rings) {
-        for (let index = 1; index < ring.length; index += 1) {
-          const from = globe.getCoords(ring[index - 1][1], ring[index - 1][0])
-          const to = globe.getCoords(ring[index][1], ring[index][0])
-          previous.set(from.x, from.y, from.z).normalize()
-          next.set(to.x, to.y, to.z).normalize()
-          // Short segments keep the borders above the curved Earth surface.
-          const segments = Math.max(1, Math.ceil(previous.angleTo(next) / 0.045))
-          for (let part = 1; part <= segments; part += 1) {
-            point.lerpVectors(previous, next, (part - 1) / segments).setLength(radius)
-            positions.push(point.x, point.y, point.z)
-            point.lerpVectors(previous, next, part / segments).setLength(radius)
-            positions.push(point.x, point.y, point.z)
-          }
-        }
-      }
-    }
-  }
-  const geometry = new THREE.BufferGeometry()
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-  const material = new THREE.LineBasicMaterial({
-    color: '#adc7a5', opacity: 0.28, transparent: true, depthWrite: false, toneMapped: false,
-  })
-  return new THREE.LineSegments(geometry, material)
 }
 
 function createCityLabel({ text }) {
@@ -110,7 +146,7 @@ function createCityLabel({ text }) {
   label.className = 'fieldshift-globe-label'
   label.textContent = text
   label.style.display = 'block'
-  label.style.transform = 'translateY(24px)'
+  label.style.transform = 'translateY(16px)'
   label.style.maxWidth = 'min(220px, 30vw)'
   label.style.overflow = 'hidden'
   label.style.textOverflow = 'ellipsis'
@@ -118,20 +154,15 @@ function createCityLabel({ text }) {
   return anchor
 }
 
-function ringColor(progress) {
-  return `rgba(203,237,117,${0.7 * (1 - progress)})`
-}
-
 export default function Globe({ selectedCity, onCityClick, onReady, onUnavailable, clouds, onCloudStatus }) {
   const hostRef = useRef(null)
   const globeRef = useRef(null)
   const dragRef = useRef(null)
-  const hovering = useRef(false)
-  const focus = useRef(false)
   const sceneSetup = useRef(null)
   const lastPoint = useRef(null)
   const [size, setSize] = useState(null)
   const [earthTexture, setEarthTexture] = useState(null)
+  const [nightSettled, setNightSettled] = useState(false)
   const [features, setFeatures] = useState([])
   const [ready, setReady] = useState(false)
   const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
@@ -172,16 +203,15 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
       onUnavailable()
     }, 12000)
     const loader = new THREE.TextureLoader()
-    const texture = loader.load(`${CDN}/img/earth-blue-marble.jpg`, (image) => {
+    const texture = loader.load(DAY_MAP, (image) => {
       if (finished) {
         image.dispose()
         return
       }
       window.clearTimeout(timeout)
       image.colorSpace = THREE.SRGBColorSpace
-      image.anisotropy = 4
-      surface.material.map = image
-      surface.material.needsUpdate = true
+      image.anisotropy = 8
+      surface.uniforms.dayMap.value = image
       setEarthTexture(image)
     }, undefined, () => {
       if (!finished) {
@@ -193,7 +223,7 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
       finished = true
       window.clearTimeout(timeout)
       texture.dispose()
-      surface.material.dispose()
+      surface.dispose()
     }
   }, [onUnavailable, surface])
 
@@ -212,28 +242,19 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
 
     const controls = globe.controls()
     controls.autoRotate = false
-    controls.autoRotateSpeed = 0.28
     controls.enableZoom = false
     controls.enablePan = false
 
     const renderer = globe.renderer()
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75))
-    renderer.toneMapping = THREE.ACESFilmicToneMapping
-    renderer.toneMappingExposure = 1.05
-
-    const scene = globe.scene()
-    const sunlight = new THREE.DirectionalLight('#fff7e8', 2.30)
-    globe.lights([new THREE.AmbientLight('#a7c0ec', 0.50), sunlight])
-    const stars = makeStars()
-    scene.add(stars)
+    globe.lights([new THREE.AmbientLight(0xffffff, 1.25)])
 
     const updateSun = () => {
       const { lat, lng } = solarPoint()
       const { x, y, z } = globe.getCoords(lat, lng)
-      surface.sun.set(x, y, z).normalize()
-      sunlight.position.copy(surface.sun).multiplyScalar(400)
+      surface.uniforms.sunDirection.value.set(x, y, z).normalize()
     }
-    globe.pointOfView(HOME_VIEW, 0)
+    globe.pointOfView({ ...dayNightView(), altitude: SELECTED_ALTITUDE }, 0)
     updateSun()
     const sunTimer = window.setInterval(updateSun, 60_000)
 
@@ -250,19 +271,24 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
       cancelAnimationFrame(frame)
       window.clearInterval(sunTimer)
       renderer.domElement.removeEventListener('webglcontextlost', contextLost)
-      scene.remove(stars)
-      stars.geometry.dispose()
-      stars.material.dispose()
     }
   }, [onReady, onUnavailable, surface])
 
   // The globe library may fire its ready callback from its initial layout pass,
   // before React assigns the imperative ref on the wrapper.
   useEffect(() => {
-    if (earthTexture && size && !ready) setupGlobe()
-  }, [earthTexture, ready, setupGlobe, size])
+    if (earthTexture && nightSettled && size && !ready) setupGlobe()
+  }, [earthTexture, nightSettled, ready, setupGlobe, size])
 
   useEffect(() => () => sceneSetup.current?.(), [])
+
+  useEffect(() => {
+    if (!ready || !size) return
+    const camera = globeRef.current.camera()
+    const stageRatio = Math.max(1, 0.97 * size.height / size.width)
+    camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(25 * Math.PI / 180) * stageRatio))
+    camera.updateProjectionMatrix()
+  }, [ready, size])
 
   useEffect(() => {
     if (!ready) return
@@ -276,45 +302,31 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
   }, [ready])
 
   useEffect(() => {
-    if (!ready || !features.length) return
-    const globe = globeRef.current
-    const borders = makeBorders(globe, features)
-    const scene = globe.scene()
-    scene.add(borders)
-    return () => {
-      scene.remove(borders)
-      borders.geometry.dispose()
-      borders.material.dispose()
+    let active = true
+    const finishLoading = () => {
+      if (!active) return
+      window.clearTimeout(timeout)
+      setNightSettled(true)
     }
-  }, [features, ready])
-
-  useEffect(() => {
-    if (!ready) return
-    const loader = new THREE.TextureLoader()
-    let disposed = false
-    const load = (path, apply) => loader.load(`${CDN}/${path}`, (texture) => {
-      if (disposed) texture.dispose()
-      else apply(texture)
-    }, undefined, () => {})
-
-    const bump = load('img/earth-topology.png', (texture) => {
-      surface.material.bumpMap = texture
-      surface.material.bumpScale = 0.36
-      surface.material.needsUpdate = true
-    })
-    const night = load('img/earth-night.jpg', (texture) => {
-      texture.colorSpace = THREE.SRGBColorSpace
-      surface.material.emissiveMap = texture
-      surface.material.emissive.set('#f9e2ab')
-      surface.material.emissiveIntensity = 0.52
-      surface.material.needsUpdate = true
-    })
+    const timeout = window.setTimeout(finishLoading, 4000)
+    const night = new THREE.TextureLoader().load(NIGHT_MAP, (texture) => {
+      if (!active) return
+      // These channels represent intensity, not display color.
+      texture.colorSpace = THREE.NoColorSpace
+      texture.wrapS = THREE.RepeatWrapping
+      texture.anisotropy = 8
+      surface.uniforms.nightMap.value = texture
+      surface.uniforms.hasNight.value = true
+      finishLoading()
+    }, undefined, finishLoading)
     return () => {
-      disposed = true
-      bump.dispose()
+      active = false
+      window.clearTimeout(timeout)
+      surface.uniforms.hasNight.value = false
+      surface.uniforms.nightMap.value = null
       night.dispose()
     }
-  }, [ready, surface])
+  }, [surface])
 
   useEffect(() => {
     if (!ready || !clouds) return
@@ -334,12 +346,22 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
     const timeout = window.setTimeout(() => result('unavailable'), 10_000)
     const texture = new THREE.TextureLoader().load(clouds.url, (image) => {
       if (!active || settled) return
-      image.colorSpace = THREE.SRGBColorSpace
       image.anisotropy = 4
-      const geometry = new THREE.SphereGeometry(globe.getGlobeRadius() * 1.010, 96, 64)
-      const material = new THREE.MeshPhongMaterial({
-        map: image, transparent: true, opacity: 0.82, depthWrite: false,
-        color: '#f7fbff', specular: '#151515', shininess: 2, alphaTest: 0.015,
+      surface.uniforms.cloudMap.value = image
+      surface.uniforms.hasClouds.value = true
+      const geometry = new THREE.SphereGeometry(globe.getGlobeRadius() * 1.0037, 128, 64)
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          cloudMap: { value: image },
+          nightMap: surface.uniforms.nightMap,
+          hasNight: surface.uniforms.hasNight,
+          sunDirection: surface.uniforms.sunDirection,
+        },
+        vertexShader: SPHERE_VERTEX,
+        fragmentShader: CLOUD_FRAGMENT,
+        transparent: true,
+        depthWrite: false,
+        toneMapped: false,
       })
       mesh = new THREE.Mesh(geometry, material)
       mesh.rotation.y = -Math.PI / 2
@@ -350,6 +372,8 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
     return () => {
       active = false
       window.clearTimeout(timeout)
+      surface.uniforms.hasClouds.value = false
+      surface.uniforms.cloudMap.value = null
       texture.dispose()
       if (mesh) {
         scene.remove(mesh)
@@ -357,17 +381,10 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
         mesh.material.dispose()
       }
     }
-  }, [clouds, onCloudStatus, ready])
-
-  const syncRotation = useCallback(() => {
-    if (!ready) return
-    globeRef.current.controls().autoRotate =
-      !reducedMotion && !markerData.length && !hovering.current && !focus.current
-  }, [markerData.length, ready, reducedMotion])
+  }, [clouds, onCloudStatus, ready, surface])
 
   useEffect(() => {
     if (!ready) return
-    syncRotation()
     const point = markerData[0]
     if (!point) {
       lastPoint.current = null
@@ -379,7 +396,7 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
       { lat: point.lat, lng: point.lng, altitude: SELECTED_ALTITUDE },
       reducedMotion ? 0 : 1500,
     )
-  }, [markerData, ready, reducedMotion, syncRotation])
+  }, [markerData, ready, reducedMotion])
 
   function startGesture(event) {
     if (!ready || event.button !== 0 || !event.isPrimary) return
@@ -425,48 +442,37 @@ export default function Globe({ selectedCity, onCityClick, onReady, onUnavailabl
     role="region"
     aria-label="Interactive Earth globe. Use the arrow keys to rotate and Enter to select the center."
     tabIndex={ready ? 0 : -1}
-    onPointerEnter={() => { hovering.current = true; syncRotation() }}
-    onPointerLeave={() => { hovering.current = false; syncRotation() }}
     onPointerDown={startGesture}
     onPointerMove={trackGesture}
     onPointerUp={endGesture}
     onPointerCancel={() => { dragRef.current = null }}
-    onFocus={() => { focus.current = true; syncRotation() }}
-    onBlur={() => { focus.current = false; syncRotation() }}
     onKeyDown={handleKey}
   >
-    {size && earthTexture && <ReactGlobe
+    {size && earthTexture && nightSettled && <ReactGlobe
       ref={globeRef}
       width={size.width}
       height={size.height}
       animateIn={false}
       backgroundColor="rgba(0,0,0,0)"
       rendererConfig={RENDERER_OPTIONS}
-      globeMaterial={surface.material}
+      globeMaterial={surface}
       globeCurvatureResolution={2}
-      showAtmosphere
-      atmosphereColor="#7aa3a2"
-      atmosphereAltitude={0.085}
+      showAtmosphere={false}
+      atmosphereAltitude={0}
       enablePointerInteraction={false}
       onGlobeReady={setupGlobe}
       polygonsData={activeCountry}
-      polygonCapColor={() => 'rgba(203,237,117,.13)'}
+      polygonCapColor={() => 'rgba(0,0,0,0)'}
       polygonSideColor={() => 'rgba(0,0,0,0)'}
-      polygonStrokeColor={() => 'rgba(203,237,117,.85)'}
+      polygonStrokeColor={() => 'rgba(224,238,199,.48)'}
       polygonAltitude={0.008}
       polygonsTransitionDuration={0}
       pointsData={markerData}
-      pointRadius={1.25}
+      pointRadius={0.76}
       pointAltitude={0.018}
-      pointColor={() => '#cbed75'}
+      pointColor={() => '#e1edc9'}
       pointResolution={18}
       pointsTransitionDuration={0}
-      ringsData={reducedMotion ? [] : markerData}
-      ringColor={() => ringColor}
-      ringAltitude={0.016}
-      ringMaxRadius={5.2}
-      ringPropagationSpeed={2.8}
-      ringRepeatPeriod={1700}
       htmlElementsData={markerData}
       htmlElement={createCityLabel}
       htmlAltitude={0.024}

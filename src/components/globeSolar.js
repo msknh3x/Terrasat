@@ -16,3 +16,23 @@ export function solarPoint(date = new Date()) {
 
   return { lat: declination * 180 / Math.PI, lng: ((longitude + 180) % 360 + 360) % 360 - 180 }
 }
+
+const TO_RADIANS = Math.PI / 180
+const DAY_NIGHT_PHASE = 74 * TO_RADIANS
+const OVERVIEW_LATITUDE = 28
+const wrapLongitude = (longitude) => ((longitude + 180) % 360 + 360) % 360 - 180
+
+export function dayNightView(date = new Date(), preferredLongitude = 68) {
+  const position = solarPoint(date)
+  const latitude = OVERVIEW_LATITUDE * TO_RADIANS
+  const sunLatitude = position.lat * TO_RADIANS
+  const offsetCosine = (Math.cos(DAY_NIGHT_PHASE) - Math.sin(latitude) * Math.sin(sunLatitude))
+    / (Math.cos(latitude) * Math.cos(sunLatitude))
+  const offset = Math.acos(Math.max(-1, Math.min(1, offsetCosine))) / TO_RADIANS
+  const east = wrapLongitude(position.lng + offset)
+  const west = wrapLongitude(position.lng - offset)
+
+  // Choose the nearer of two mid-latitude camera positions with the same solar phase.
+  const lng = Math.abs(wrapLongitude(east - preferredLongitude)) <= Math.abs(wrapLongitude(west - preferredLongitude)) ? east : west
+  return { lat: OVERVIEW_LATITUDE, lng }
+}

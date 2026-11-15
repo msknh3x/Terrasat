@@ -1,4 +1,4 @@
-import { findLocalLocation, LOCATIONS } from '../data/locations.js'
+import { findLocalLocation, LOCATIONS, normalizeLocationQuery } from '../data/locations.js'
 import { pointCoordinates, requestJson } from './http.js'
 
 const ENDPOINT = 'https://nominatim.openstreetmap.org'
@@ -24,6 +24,25 @@ function parsePlace(result) {
   }
 }
 
+async function lookupOfflineCity(query) {
+  // Download the city index only on the first explicit, non-local city search.
+  const chunk = await import('../data/cityGazetteer.json', { with: { type: 'json' } }).catch(() => null)
+  const gazetteer = chunk?.default
+  const key = normalizeLocationQuery(query)
+  if (!gazetteer || !Object.hasOwn(gazetteer.lookup, key)) return null
+
+  const [id, name, lat, lon, countryCode, region] = gazetteer.rows[gazetteer.lookup[key]]
+  return {
+    id: `geonames-${id}`,
+    name,
+    lat,
+    lon,
+    region,
+    countryCode,
+    country: gazetteer.countries[countryCode],
+  }
+}
+
 async function queryNominatim(path, params, signal) {
   const url = new URL(path, ENDPOINT)
   url.search = new URLSearchParams({ format: 'jsonv2', addressdetails: 1, 'accept-language': 'en', ...params })
@@ -46,6 +65,7 @@ async function queryNominatim(path, params, signal) {
 }
 
 export async function geocodeCity(query, { signal } = {}) {
+  signal?.throwIfAborted()
   const q = query.trim()
   if (!q) return null
   const featured = findLocalLocation(q)
@@ -62,6 +82,10 @@ export async function geocodeCity(query, { signal } = {}) {
       return fallback
     }
   }
+  const offline = await lookupOfflineCity(q)
+  signal?.throwIfAborted()
+  if (offline) return offline
+
   const results = await queryNominatim('/search', { q, limit: 1 }, signal)
   return results[0] ? parsePlace(results[0]) : null
 }

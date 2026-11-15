@@ -9,27 +9,40 @@ export const LOCATIONS = [
 
 export const DEFAULT_LOCATION = LOCATIONS[0]
 
-function normalize(value) {
-  return value.normalize('NFD').replace(/\p{Diacritic}/gu, '').trim().toLowerCase()
+const PAKISTAN_QUALIFIERS = ['pakistan', 'pk', 'pak']
+
+export function normalizeLocationQuery(value) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’‘]/g, "'")
+    .toLowerCase().replace(/[,\s]+/g, ' ').trim()
 }
 
 function cityTerms(location) {
-  return [location.name, ...location.aliases].map(normalize)
+  return [location.name, ...location.aliases].map(normalizeLocationQuery)
+}
+
+function qualifiedCityTerms(location) {
+  const region = normalizeLocationQuery(location.region)
+  return cityTerms(location).flatMap((city) => [
+    city,
+    `${city} ${region}`,
+    ...PAKISTAN_QUALIFIERS.flatMap((country) => [
+      `${city} ${country}`,
+      `${city} ${region} ${country}`,
+      `${city} ${country} ${region}`,
+    ]),
+  ])
 }
 
 export function findLocalLocation(query) {
-  const [city, ...area] = normalize(query).split(',').map((term) => term.trim())
-  return LOCATIONS.find((location) => (
-    cityTerms(location).includes(city)
-    && area.every((term) => [location.country, location.region].map(normalize).includes(term))
-  )) ?? null
+  const normalized = normalizeLocationQuery(query)
+  return LOCATIONS.find((location) => qualifiedCityTerms(location).includes(normalized)) ?? null
 }
 
 export function searchLocalLocations(query) {
-  const normalized = normalize(query)
+  const normalized = normalizeLocationQuery(query)
   if (!normalized) return LOCATIONS
   return LOCATIONS.filter((location) => (
-    [...cityTerms(location), normalize(location.region), normalize(location.country)]
+    [...qualifiedCityTerms(location), normalizeLocationQuery(location.region), normalizeLocationQuery(location.country)]
       .some((term) => term.startsWith(normalized))
   ))
 }

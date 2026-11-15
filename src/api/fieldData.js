@@ -34,23 +34,37 @@ export function getDemoFieldData(location) {
   return result
 }
 
+export function requestFieldSources(location, { signal } = {}) {
+  signal?.throwIfAborted()
+  const bundled = getDemoFieldData(location)
+  if (bundled) {
+    const { climate, soil, warnings } = bundled
+    return { climate: Promise.resolve(climate), ground: Promise.resolve({ soil, warnings }) }
+  }
+
+  const { lat, lon } = location
+  const climate = fetchClimateData(lat, lon, { signal }).catch((cause) => {
+    signal?.throwIfAborted()
+    throw new Error('NASA POWER climate history could not be loaded for this location. Try again in a moment.', { cause })
+  })
+  const ground = fetchSoilData(lat, lon, { signal }).then(
+    (soil) => ({ soil, warnings: soil ? [] : [noSoilWarning()] }),
+    () => {
+      signal?.throwIfAborted()
+      return { soil: null, warnings: [soilUnavailableWarning()] }
+    },
+  )
+
+  return { climate, ground }
+}
+
 export async function loadFieldData(location, { signal } = {}) {
   signal?.throwIfAborted()
   const bundled = getDemoFieldData(location)
   if (bundled) return bundled
 
-  const [climate, soil] = await Promise.allSettled([
-    fetchClimateData(location.lat, location.lon, { signal }),
-    fetchSoilData(location.lat, location.lon, { signal }),
-  ])
+  const sources = requestFieldSources(location, { signal })
+  const [climate, ground] = await Promise.all([sources.climate, sources.ground])
   signal?.throwIfAborted()
-  if (climate.status === 'rejected') {
-    throw new Error('NASA POWER climate history could not be loaded for this location. Try again in a moment.', { cause: climate.reason })
-  }
-
-  return {
-    climate: climate.value,
-    soil: soil.status === 'fulfilled' ? soil.value : null,
-    warnings: soil.status === 'rejected' ? [soilUnavailableWarning()] : soil.value ? [] : [noSoilWarning()],
-  }
+  return { climate, ...ground }
 }

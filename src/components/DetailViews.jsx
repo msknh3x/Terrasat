@@ -1,9 +1,12 @@
 import { Fragment, useState } from 'react'
 import {
-  CalendarDays, ChevronDown, CloudRain, Droplet, Droplets, FlaskConical,
-  Info, Layers, Leaf, Snowflake, Sprout, Sun, Thermometer, Waves, Wheat, Wind,
+  ArrowUpRight, CalendarDays, ChevronDown, CloudRain, Droplet, Droplets, FlaskConical,
+  Info, Leaf, LoaderCircle, MapPin, Snowflake, Sprout, Sun, Thermometer, Waves, Wheat, Wind,
 } from 'lucide-react'
 import './details.css'
+
+const powerSource = { label: 'NASA POWER', url: 'https://power.larc.nasa.gov/docs/services/api/temporal/monthly/' }
+const soilGridsSource = { label: 'ISRIC SoilGrids', url: 'https://isric.org/explore/soilgrids/' }
 
 const cropStatus = {
   recommended: 'Recommended',
@@ -37,10 +40,13 @@ export function CropGlyph({ crop, size = 18 }) {
   return <Glyph aria-hidden="true" size={size} strokeWidth={1.6} />
 }
 
-function ViewHeader({ title, description, action }) {
+function ViewHeader({ title, description, location, action }) {
+  const place = [location?.name, location?.country].filter(Boolean).join(', ')
+
   return (
     <header className="fd-heading">
       <div>
+        {place && <span className="fd-location"><MapPin size={13} aria-hidden="true" />{place}</span>}
         <h1>{title}</h1>
         <p>{description}</p>
       </div>
@@ -68,13 +74,39 @@ function Empty({ icon: Icon = Info, title, children }) {
   )
 }
 
+function LoadingData({ title, children }) {
+  return (
+    <div className="fd-loading" role="status">
+      <LoaderCircle size={19} aria-hidden="true" />
+      <div><strong>{title}</strong><p>{children}</p></div>
+    </div>
+  )
+}
+
 function Badge({ type, labels }) {
   return <span className={`fd-badge fd-${type}`}><i aria-hidden="true" />{labels[type] ?? type}</span>
 }
 
 function SourceLink({ source }) {
   if (!source?.url) return null
-  return <a className="fd-source" href={source.url} target="_blank" rel="noreferrer">{source.label}</a>
+  return (
+    <a className="fd-source" href={source.url} target="_blank" rel="noreferrer">
+      {source.label}<ArrowUpRight size={12} aria-hidden="true" />
+    </a>
+  )
+}
+
+function ObservationStrip({ entries }) {
+  return (
+    <dl className="fd-observation-strip" style={{ '--fd-entry-count': entries.length }}>
+      {entries.map(({ label, value, source }) => (
+        <div key={label}>
+          <dt>{label}</dt>
+          <dd>{value}<SourceLink source={source} /></dd>
+        </div>
+      ))}
+    </dl>
+  )
 }
 
 function WaterSource({ irrigation, onIrrigationChange }) {
@@ -116,29 +148,39 @@ function CropDetails({ crop, id }) {
   )
 }
 
-export function CropView({ advisory, location, irrigation = 'rainfed', onIrrigationChange }) {
+export function CropView({ advisory, location, irrigation = 'rainfed', onIrrigationChange, isLoading, soilStatus }) {
   const [filter, setFilter] = useState('all')
   const [expanded, setExpanded] = useState(null)
   const crops = advisory?.crops ?? []
   const visible = crops.filter((crop) => filter === 'all' || crop.status === filter)
   const filters = [['all', 'All crops'], ...Object.entries(cropStatus)]
-  const subtitle = location?.name
-    ? `Compare crop fit for ${location.name} using historical growing conditions, soil and water access.`
-    : 'Compare crop fit using historical growing conditions, soil and water access.'
+  const soilPending = soilStatus === 'loading'
 
   return (
     <div className="fd-view">
       <ViewHeader
         title="Crop advisor"
-        description={subtitle}
-        action={crops.length > 0 && <WaterSource irrigation={irrigation} onIrrigationChange={onIrrigationChange} />}
+        location={location}
+        description="Compare crops by growing-season heat, rainfall and the water you can supply."
+        action={!isLoading && crops.length > 0 && <WaterSource irrigation={irrigation} onIrrigationChange={onIrrigationChange} />}
       />
-      {crops.length === 0 ? (
+      {isLoading ? (
+        <LoadingData title="Loading crop outlook">Waiting for the historical temperature and rainfall record from NASA POWER.</LoadingData>
+      ) : crops.length === 0 ? (
         <Empty icon={Sprout} title="Crop ratings unavailable">
           {advisory?.cropNote ?? advisory?.calendarNote ?? 'Choose a location with a supported regional crop calendar to see crop ratings.'}
         </Empty>
       ) : (
         <>
+          <ObservationStrip entries={[
+            { label: 'Climate record', source: powerSource },
+            {
+              label: 'Modeled soil',
+              value: { loading: 'Loading', unavailable: 'Unavailable' }[soilStatus],
+              source: soilStatus === 'ready' ? soilGridsSource : undefined,
+            },
+            { label: 'Crop reference', value: 'Pakistan seasonal catalog' },
+          ].filter(({ value, source }) => value || source)} />
           <div className="fd-filter" role="group" aria-label="Crop fit filters">
             {filters.map(([value, label]) => {
               const count = value === 'all' ? crops.length : crops.filter((crop) => crop.status === value).length
@@ -219,7 +261,9 @@ export function CropView({ advisory, location, irrigation = 'rainfed', onIrrigat
               Select a different filter to see the rest of the crop catalog.
             </Empty>
           )}
-          <Notice>{advisory?.cropNote ?? 'Scores are a first-pass comparison. Check field drainage, water availability and local variety guidance before selecting a crop.'}</Notice>
+          <Notice>{soilPending
+            ? 'Scores use the historical climate and selected water source while the soil estimate loads.'
+            : advisory?.cropNote ?? 'Check field drainage, water availability and local variety guidance before selecting a crop.'}</Notice>
         </>
       )}
     </div>
@@ -280,36 +324,55 @@ function WorkerExposure({ health = [] }) {
   )
 }
 
-export function RiskView({ advisory, location }) {
+function RiskCard({ risk }) {
+  const [measurementOrMonth, measurement] = risk.signal?.split(' · ', 2) ?? []
+
+  return (
+    <article className={`fd-risk-card fd-${risk.level}`}>
+      <div className="fd-risk-top">
+        <span className="fd-icon"><RiskIcon id={risk.id} /></span>
+        <Badge type={risk.level} labels={riskStatus} />
+      </div>
+      <h2>{risk.name}</h2>
+      <p className="fd-risk-signal">
+        <span>{measurement ?? measurementOrMonth}</span>{measurement && <> <small>{measurementOrMonth}</small></>}
+      </p>
+      <SignalMeter level={risk.level} />
+      <p>{risk.description}</p>
+      <SourceLink source={risk.source} />
+    </article>
+  )
+}
+
+export function RiskView({ advisory, location, isLoading }) {
   const risks = advisory?.risks ?? []
-  const target = location?.name ? ` around ${location.name}` : ''
 
   return (
     <div className="fd-view">
-      <ViewHeader title="Climate risks" description={`Historical signals${target} that can inform seasonal planning.`} />
-      {risks.length > 0 ? (
-        <div className="fd-risk-grid">
-          {risks.map((risk) => (
-            <article key={risk.id} className="fd-risk-card">
-              <div className="fd-risk-top">
-                <span className="fd-icon"><RiskIcon id={risk.id} /></span>
-                <Badge type={risk.level} labels={riskStatus} />
-              </div>
-              <h2>{risk.name}</h2>
-              <p className="fd-risk-signal">{risk.signal}</p>
-              <SignalMeter level={risk.level} />
-              <p>{risk.description}</p>
-              <SourceLink source={risk.source} />
-            </article>
-          ))}
-        </div>
+      <ViewHeader
+        title="Climate risks"
+        location={location}
+        description="See when historical heat, rainfall and cold could affect crops and field work."
+      />
+      {isLoading ? (
+        <LoadingData title="Loading climate risks">Waiting for the NASA POWER record used to calculate the seasonal signals.</LoadingData>
+      ) : risks.length > 0 ? (
+        <>
+          <ObservationStrip entries={[
+            { label: 'Climate record', source: powerSource },
+            { label: 'Indicator basis', value: 'Monthly averages and long-term trends' },
+          ]} />
+          <div className="fd-risk-grid">
+            {risks.map((risk) => <RiskCard key={risk.id} risk={risk} />)}
+          </div>
+          <WorkerExposure health={advisory?.health} />
+          <Notice>{advisory?.riskNote ?? 'Use local forecasts and official advisories for immediate weather and health decisions.'}</Notice>
+        </>
       ) : (
         <Empty icon={CloudRain} title="Climate signals unavailable">
           Climate history for this location is required to calculate the indicators.
         </Empty>
       )}
-      <WorkerExposure health={advisory?.health} />
-      <Notice>{advisory?.riskNote ?? 'These indicators describe past climate patterns. Use local forecasts and official advisories for immediate weather and health decisions.'}</Notice>
     </div>
   )
 }
@@ -319,6 +382,7 @@ function CalendarLegend() {
     <div className="fd-calendar-legend" aria-label="Calendar legend">
       <span><i className="fd-sowing" /> Sow</span>
       <span><i className="fd-harvest" /> Harvest</span>
+      <span><i className="fd-month-key" /> Current month</span>
     </div>
   )
 }
@@ -340,7 +404,24 @@ function CalendarCell({ crop, monthNumber, active }) {
   )
 }
 
-export function CalendarView({ advisory }) {
+function CalendarSources({ crops }) {
+  const unique = new Map()
+  for (const { source } of crops) {
+    if (source?.url) unique.set(source.url, source)
+  }
+  if (!unique.size) return null
+
+  return (
+    <section className="fd-calendar-sources" aria-labelledby="fd-calendar-sources-title">
+      <h2 id="fd-calendar-sources-title">Calendar references</h2>
+      <ul>
+        {[...unique.values()].map((source) => <li key={source.url}><SourceLink source={source} /></li>)}
+      </ul>
+    </section>
+  )
+}
+
+export function CalendarView({ advisory, location, isLoading }) {
   const [showAll, setShowAll] = useState(false)
   const calendar = advisory?.calendar ?? []
   const recommended = calendar.filter((crop) => crop.status === 'recommended')
@@ -351,89 +432,92 @@ export function CalendarView({ advisory }) {
     <div className="fd-view">
       <ViewHeader
         title="Planting calendar"
-        description="Find reference windows for sowing and harvest."
-        action={calendar.length > 0 && <CalendarLegend />}
+        location={location}
+        description="Plan around regional sowing and harvest windows."
       />
-      {recommended.length > 0 && recommended.length !== calendar.length && (
-        <div className="fd-filter" role="group" aria-label="Calendar crop filters">
-          <button type="button" aria-pressed={!showAll} onClick={() => setShowAll(false)}>Recommended <span>{recommended.length}</span></button>
-          <button type="button" aria-pressed={showAll} onClick={() => setShowAll(true)}>All crops <span>{calendar.length}</span></button>
-        </div>
-      )}
-      {calendar.length > 0 ? (
-        <div className="fd-table-wrap fd-calendar-wrap" tabIndex={0} role="region" aria-label="Scrollable planting and harvest calendar">
-          <table className="fd-calendar">
-            <thead>
-              <tr>
-                <th scope="col">Crop / season</th>
-                {months.map((month, index) => (
-                  <th key={month} scope="col" className={index === currentMonth ? 'fd-current-month' : undefined}>
-                    <abbr title={month}>{month.slice(0, 3)}</abbr>
-                    {index === currentMonth && <span className="fd-sr">, current month</span>}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((crop) => (
-                <tr key={crop.id}>
-                  <th scope="row">
-                    <span className="fd-calendar-crop">{crop.name}</span>
-                    <small>{crop.season}</small>
-                  </th>
-                  {months.map((month, index) => <CalendarCell crop={crop} key={month} active={index === currentMonth} monthNumber={index + 1} />)}
+      {isLoading ? (
+        <LoadingData title="Loading planting calendar">Matching regional crop windows with the location's climate record.</LoadingData>
+      ) : calendar.length > 0 ? (
+        <>
+          <div className="fd-calendar-controls">
+            {recommended.length > 0 && recommended.length !== calendar.length && (
+              <div className="fd-filter" role="group" aria-label="Calendar crop filters">
+                <button type="button" aria-pressed={!showAll} onClick={() => setShowAll(false)}>Recommended <span>{recommended.length}</span></button>
+                <button type="button" aria-pressed={showAll} onClick={() => setShowAll(true)}>All crops <span>{calendar.length}</span></button>
+              </div>
+            )}
+            <CalendarLegend />
+          </div>
+          <div className="fd-table-wrap fd-calendar-wrap" tabIndex={0} role="region" aria-label="Scrollable planting and harvest calendar">
+            <table className="fd-calendar">
+              <thead>
+                <tr>
+                  <th scope="col">Crop / season</th>
+                  {months.map((month, index) => (
+                    <th key={month} scope="col" className={index === currentMonth ? 'fd-current-month' : undefined}>
+                      <abbr title={month}>{month.slice(0, 3)}</abbr>
+                      {index === currentMonth && <span className="fd-sr">, current month</span>}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {visible.map((crop) => (
+                  <tr key={crop.id}>
+                    <th scope="row">
+                      <span className="fd-calendar-crop">{crop.name}</span>
+                      <small>{crop.season}</small>
+                    </th>
+                    {months.map((month, index) => <CalendarCell crop={crop} key={month} active={index === currentMonth} monthNumber={index + 1} />)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <CalendarSources crops={visible} />
+          <Notice>{advisory?.calendarNote ?? 'Reference windows vary by variety, district, water access and seasonal weather. Confirm timing with local extension guidance.'}</Notice>
+        </>
       ) : (
         <Empty icon={CalendarDays} title="No planting windows available">
           {advisory?.calendarNote ?? 'Planting windows appear when the regional crop catalog has a supported match.'}
         </Empty>
-      )}
-      {calendar.length > 0 && (
-        <Notice>{advisory?.calendarNote ?? 'Reference windows vary by variety, district, water access and seasonal weather. Confirm timing with local extension guidance.'}</Notice>
       )}
     </div>
   )
 }
 
 const soilTypes = [
-  { key: 'sand', name: 'Sand', color: '#e2ad79' },
-  { key: 'silt', name: 'Silt', color: '#94b5a0' },
-  { key: 'clay', name: 'Clay', color: '#a47b63' },
+  { key: 'sand', name: 'Sand', color: '#eac196' },
+  { key: 'silt', name: 'Silt', color: '#a8be9d' },
+  { key: 'clay', name: 'Clay', color: '#d69b8a' },
 ]
 
 function SoilComposition({ soil }) {
   const parts = soilTypes.filter(({ key }) => Number.isFinite(soil[key]) && soil[key] >= 0)
   const total = parts.reduce((sum, { key }) => sum + soil[key], 0)
-  let position = 0
   const hasGraphic = parts.length === soilTypes.length && total > 0
-  const stops = hasGraphic ? parts.map(({ color, key }) => {
-    const start = position
-    position += soil[key] / total * 100
-    return `${color} ${start}% ${position}%`
-  }).join(', ') : null
 
   return (
     <section className="fd-soil-composition">
-      <h2>Soil composition</h2>
-      <div className="fd-soil-composition-body">
-        {hasGraphic && (
-          <div className="fd-soil-donut" style={{ '--fd-soil-slices': `conic-gradient(${stops})` }} aria-hidden="true">
-            <span><Layers size={28} strokeWidth={1.25} /></span>
+      <h2>Particle composition</h2>
+      {hasGraphic && (
+        <div className="fd-texture-graphic" aria-hidden="true">
+          <div className="fd-texture-strip">
+            {parts.map(({ key, color }) => (
+              <span key={key} style={{ flexBasis: `${soil[key] / total * 100}%`, '--fd-soil-swatch': color }} />
+            ))}
           </div>
-        )}
-        <dl className="fd-soil-legend">
-          {soilTypes.map(({ name, key, color }) => (
-            <div key={key}>
-              <dt><i style={{ '--fd-soil-swatch': color }} />{name}</dt>
-              <dd>{Number.isFinite(soil[key]) ? `${formatValue(soil[key])}%` : 'Unavailable'}</dd>
-            </div>
-          ))}
-        </dl>
-      </div>
+          <div className="fd-texture-axis"><span>0%</span><span>50%</span><span>100%</span></div>
+        </div>
+      )}
+      <dl className="fd-soil-legend">
+        {soilTypes.map(({ name, key, color }) => (
+          <div key={key}>
+            <dt><i style={{ '--fd-soil-swatch': color }} />{name}</dt>
+            <dd>{Number.isFinite(soil[key]) ? `${formatValue(soil[key])}%` : 'Unavailable'}</dd>
+          </div>
+        ))}
+      </dl>
     </section>
   )
 }
@@ -472,8 +556,7 @@ function SoilChemistry({ soil }) {
 }
 
 export function SoilView({ soil, location, soilStatus }) {
-  const source = soil?.source && soil.source !== 'soilgrids' ? soil.source : 'ISRIC SoilGrids'
-  const depth = soil?.depth ?? 'Unavailable'
+  const source = soil?.source && soil.source !== 'soilgrids' ? { label: soil.source } : soilGridsSource
   const point = soil?.point
   const hasPoint = Number.isFinite(point?.lat) && Number.isFinite(point?.lon)
   const coordinate = (value, axis) => `${Math.abs(value).toFixed(3)}° ${axis[value < 0 ? 1 : 0]}`
@@ -484,30 +567,28 @@ export function SoilView({ soil, location, soilStatus }) {
     <div className="fd-view">
       <ViewHeader
         title="Soil profile"
-        description={location?.name ? `Modeled topsoil properties near ${location.name}.` : 'Modeled topsoil properties for this location.'}
+        location={location}
+        description="Check modeled topsoil texture and chemistry before taking field samples."
       />
       {hasSoil ? (
         <>
-          <div className="fd-soil-summary">
-            <span className="fd-icon"><Layers size={25} aria-hidden="true" /></span>
-            <div><span>Estimated texture</span><strong>{soil.texture || 'Unavailable'}</strong></div>
-            <div><span>Modeled depth</span><strong>{depth}</strong></div>
-            <div><span>{soil.mode === 'snapshot' ? 'Saved estimate from' : 'Source'}</span><strong>{source}</strong></div>
-          </div>
+          <ObservationStrip entries={[
+            { label: 'Estimated texture', value: soil.texture || 'Unavailable' },
+            { label: 'Modeled depth', value: soil.depth ?? 'Unavailable' },
+            { label: '250 m grid point', value: cellLabel || 'Unavailable' },
+            { label: soil.mode === 'snapshot' ? 'Saved estimate' : 'Soil model', value: source.url ? undefined : source.label, source },
+          ]} />
           <div className="fd-soil-grid">
             <SoilChemistry soil={soil} />
             <SoilComposition soil={soil} />
           </div>
-          <Notice>
-            {hasPoint ? `Modeled 250 m grid cell at ${cellLabel}. ` : 'These values describe a model grid cell. '}
-            Sample your field before choosing a soil amendment or fertilizer rate.
-          </Notice>
+          <Notice>Soil conditions can vary within a grid cell. Sample your field before choosing a soil amendment or fertilizer rate.</Notice>
         </>
+      ) : soilStatus === 'loading' ? (
+        <LoadingData title="Loading soil profile">Waiting for modeled topsoil properties from ISRIC SoilGrids.</LoadingData>
       ) : (
-        <Empty icon={FlaskConical} title={soilStatus === 'loading' ? 'Requesting the soil profile' : 'Soil data unavailable'}>
-          {soilStatus === 'loading'
-            ? 'Waiting for modeled soil properties for this location.'
-            : 'Soil data is not available for this location. Crop recommendations are based on climate data only.'}
+        <Empty icon={FlaskConical} title="Soil data unavailable">
+          Soil data is not available for this location. Crop recommendations are based on climate data only.
         </Empty>
       )}
     </div>
