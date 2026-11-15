@@ -2,6 +2,10 @@
 
 FieldShift is an Earth-observation dashboard for exploring local climate history and planning crop rotations. It opens with the Peshawar outlook and includes archived source data for six locations in Pakistan. Its planning tools address the [2026 NASA Space Apps Field Shift challenge](https://www.spaceappschallenge.org/2026/challenges/field-shift-adapting-farms-with-nasa-data/).
 
+## Demo
+
+<video src="public/demo.mp4" controls="controls" width="100%"></video>
+
 ## Getting Started
 
 ### Prerequisites
