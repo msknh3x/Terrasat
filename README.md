@@ -4,7 +4,7 @@ FieldShift is an Earth-observation dashboard for exploring local climate history
 
 ## Demo
 
-<video src="public/demo.mp4" controls="controls" width="100%"></video>
+<video src="https://github.com/HamzaTaif/Terrasat/raw/main/public/demo.mp4" controls="controls" width="100%"></video>
 
 ## Getting Started
 
