@@ -5,7 +5,8 @@ import { CalendarView, CropView, RiskView, SoilView } from './components/DetailV
 import LocalAtmosphere from './components/LocalAtmosphere.jsx'
 import RotationPlanner from './components/RotationPlanner.jsx'
 import { fetchSatelliteClouds } from './api/satelliteClouds.js'
-import { LOCATIONS, searchLocalLocations } from './data/locations.js'
+import { getCitiesForCountry, LOCATIONS, searchLocalLocations } from './data/locations.js'
+import { placeMatchesQuery, searchPlaces } from './api/geocode.js'
 import { analyzeAllTrends } from './analysis/trends.js'
 import { ADVISORY_SOURCES, buildAdvisory } from './analysis/advisory.js'
 import { useFieldSearch } from './hooks/useFieldSearch.js'
@@ -75,23 +76,111 @@ function coordinates(location) {
 }
 
 function locationLabel(location) {
+  if (location.isCountry) return 'Country'
   return [location.region, location.country].filter((name, index, list) => name && list.indexOf(name) === index).join(', ')
 }
 
 function SearchBox({ location, busy, onSearch, variant = 'hero' }) {
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
-  const matches = query.trim() ? searchLocalLocations(query) : LOCATIONS.slice(0, 5)
+  const [matches, setMatches] = useState([])
+  const [hasQueried, setHasQueried] = useState(false)
   const focus = useRef(null)
   const form = useRef(null)
+  const timer = useRef(null)
+  const abortController = useRef(null)
+
+  const isCountry = Boolean(location?.isCountry)
+  const countryCode = isCountry ? location.countryCode : null
+
+  useEffect(() => {
+    const trimmed = query.trim()
+    if (!trimmed) {
+      setHasQueried(false)
+      abortController.current?.abort()
+      let initial = searchLocalLocations('', { countryCode })
+      if (!initial.length && countryCode) {
+        getCitiesForCountry(countryCode, null, 5)
+      }
+      setMatches(initial.length ? initial.slice(0, 5) : LOCATIONS.slice(0, 5))
+      return
+    }
+
+    setHasQueried(true)
+    const instant = searchLocalLocations(trimmed, { countryCode })
+    setMatches(instant)
+
+    clearTimeout(timer.current)
+    abortController.current?.abort()
+    const controller = new AbortController()
+    abortController.current = controller
+
+    timer.current = setTimeout(async () => {
+      try {
+        const results = await searchPlaces(trimmed, { signal: controller.signal, limit: 8, countryCode })
+        if (!controller.signal.aborted) {
+          setMatches(results)
+        }
+      } catch {
+        // Ignored
+      }
+    }, 180)
+
+    return () => {
+      clearTimeout(timer.current)
+      controller.abort()
+    }
+  }, [query, countryCode])
 
   async function submit(value) {
-    if (!String(value?.name ?? value ?? '').trim()) return
+    if (!value) return
+    const isObject = typeof value === 'object' && Number.isFinite(value?.lat) && Number.isFinite(value?.lon)
+    const rawQuery = isObject ? value.name : String(value).trim()
+    if (!rawQuery) return
+
+    if (isObject) {
+      setOpen(false)
+      const res = await onSearch(value)
+      if (res && !res.ambiguous) setQuery('')
+      return
+    }
+
+    const candidateMatches = matches.filter((m) => placeMatchesQuery(m, rawQuery))
+    if (candidateMatches.length > 1) {
+      const firstName = candidateMatches[0].name.toLowerCase()
+      const allSameName = candidateMatches.every((m) => m.name.toLowerCase() === firstName)
+      if (allSameName) {
+        setOpen(true)
+        requestAnimationFrame(() => form.current?.querySelector('.location-option')?.focus())
+        return
+      }
+    }
+
+    if (candidateMatches.length === 1) {
+      setOpen(false)
+      const res = await onSearch(candidateMatches[0])
+      if (res && !res.ambiguous) setQuery('')
+      return
+    }
+
     const submittedText = query
-    setOpen(false)
-    const success = await onSearch(value)
-    if (success) setQuery((current) => current === submittedText ? '' : current)
+    const res = await onSearch(rawQuery)
+    if (res && !res.ambiguous) {
+      setOpen(false)
+      setQuery((current) => current === submittedText ? '' : current)
+    } else if (res?.ambiguous && res?.choices?.length) {
+      setMatches(res.choices)
+      setOpen(true)
+      requestAnimationFrame(() => form.current?.querySelector('.location-option')?.focus())
+    } else {
+      setMatches([])
+      setOpen(true)
+    }
   }
+
+  const placeholderText = isCountry
+    ? `Search city or town in ${location.name}…`
+    : 'City, town, or country'
 
   return <form className={`location-search location-search-${variant}`} role="search" ref={form} onBlur={(event) => {
     if (!form.current?.contains(event.relatedTarget)) setOpen(false)
@@ -108,12 +197,28 @@ function SearchBox({ location, busy, onSearch, variant = 'hero' }) {
   }}>
     <div className="search-input">
       <Search size={19} aria-hidden="true" />
-      <input ref={focus} type="search" aria-label="Search by city or farm location" placeholder="City or farm location" value={query} onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true) }} autoComplete="off" />
-      <button type="submit" className="button button-primary" disabled={!query.trim()} aria-busy={busy}>{busy ? <LoaderCircle size={16} className="spin" /> : <ArrowRight size={16} />} <span>{busy ? 'Locating' : 'Analyze'}</span></button>
+      <input ref={focus} type="search" aria-label="Search by city, town, or country" placeholder={placeholderText} value={query} onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true) }} autoComplete="off" />
+      <button type="submit" className="button button-primary" disabled={!query.trim() || busy} aria-busy={busy}>{busy ? <LoaderCircle size={16} className="spin" /> : <ArrowRight size={16} />} <span>{busy ? 'Locating' : 'Analyze'}</span></button>
     </div>
-    {open && matches.length > 0 && <div className="location-options" aria-label="Suggested locations">
-      <span className="location-options-label">{query.trim() ? 'Matching launch locations' : 'Explore a location'}</span>
-      {matches.map((item) => <button key={item.id} type="button" className="location-option" onClick={() => submit(item)}><MapPin size={15} /><span><strong>{item.name}</strong><small>{locationLabel(item)}</small></span>{location.id === item.id && <i>Selected</i>}</button>)}
+    {open && <div className="location-options" aria-label="Suggested locations">
+      <span className="location-options-label">
+        {query.trim()
+          ? (matches.length > 1 && matches.every((m) => m.name.toLowerCase() === matches[0].name.toLowerCase())
+              ? 'Select region for ' + matches[0].name
+              : 'Matching locations')
+          : (isCountry ? `Cities & towns in ${location.name}` : 'Explore a location')}
+      </span>
+      {matches.length > 0 ? (
+        matches.map((item) => <button key={item.id} type="button" className="location-option" onClick={() => submit(item)}>
+          <MapPin size={15} />
+          <span><strong>{item.name}</strong><small>{locationLabel(item)}</small></span>
+          {item.isCountry && <span className="location-type-tag">Country</span>}
+          {!item.isCountry && item.type && item.type !== 'city' && <span className="location-type-tag">{item.type}</span>}
+          {location.id === item.id && <i>Selected</i>}
+        </button>)
+      ) : hasQueried ? (
+        <div className="location-options-empty" role="status">No matching country, city, or town found.</div>
+      ) : null}
     </div>}
   </form>
 }
@@ -125,6 +230,15 @@ function Hero({ location, selectedCity, onSearch, busy }) {
   const [satelliteClouds, setSatelliteClouds] = useState(null)
   const [satelliteUnavailable, setSatelliteUnavailable] = useState(false)
   const [cloudStatus, setCloudStatus] = useState(null)
+
+  const isCountry = Boolean(location.isCountry)
+  const quickLocations = useMemo(() => {
+    if (isCountry) {
+      const countryCities = LOCATIONS.filter((item) => item.countryCode === location.countryCode)
+      return (countryCities.length ? countryCities : LOCATIONS).slice(0, 3)
+    }
+    return LOCATIONS.filter((item) => item.id !== location.id).slice(0, 3)
+  }, [location, isCountry])
 
   const markReady = useCallback(() => setGlobeReady(true), [])
   const markUnavailable = useCallback(() => {
@@ -205,9 +319,13 @@ function Hero({ location, selectedCity, onSearch, busy }) {
       <div className="hero-kicker"><Satellite size={15} aria-hidden="true" /> Farm climate observatory</div>
       <h1 id="outlook-title">{location.name}</h1>
       <div className="hero-place"><MapPin size={16} /><span>{locationLabel(location) || 'Selected location'}</span><span className="hero-separator" /><span className="hero-coordinates">{coordinates(location)}</span></div>
-      <p>Use NASA climate records to see how heat and rainfall are shifting, then plan what to grow next.</p>
+      {isCountry ? (
+        <p className="hero-country-hint">Selected country: <strong>{location.name}</strong>. Choose a city or town below to analyze local farm climate and soil data.</p>
+      ) : (
+        <p>Use NASA climate records to see how heat and rainfall are shifting, then plan what to grow next.</p>
+      )}
       <SearchBox location={location} busy={busy} onSearch={onSearch} />
-      <div className="hero-quick"><span>Quick look</span>{LOCATIONS.filter((item) => item.id !== location.id).slice(0, 3).map((item) => <button type="button" key={item.id} onClick={() => onSearch(item)}>{item.name}<ChevronRight size={12} /></button>)}</div>
+      <div className="hero-quick"><span>{isCountry ? 'Explore cities' : 'Quick look'}</span>{quickLocations.map((item) => <button type="button" key={item.id} onClick={() => onSearch(item)}>{item.name}<ChevronRight size={12} /></button>)}</div>
     </div>
     <div className="hero-visual">
       <div className="hero-globe-frame" data-ready={globeReady || undefined}>
@@ -356,7 +474,7 @@ export default function App() {
   const selectLocation = useCallback(async (query) => {
     setReportError('')
     const found = await runSearch(query)
-    if (found && searchDialog.current?.open) searchDialog.current.close()
+    if (found && !found.ambiguous && searchDialog.current?.open) searchDialog.current.close()
     return found
   }, [runSearch])
 
@@ -428,7 +546,7 @@ export default function App() {
     <Methods dialogRef={methodDialog} />
     <dialog ref={searchDialog} className="search-dialog" onClose={() => setSearching(false)} onClick={(event) => { if (event.target === event.currentTarget) event.currentTarget.close() }}>
       <div className="dialog-inner">
-        <div className="dialog-head"><div><h2>Change location</h2><p>Search for a city near your farm.</p></div><button type="button" className="icon-button" aria-label="Close location search" onClick={() => searchDialog.current.close()}><X size={20} /></button></div>
+        <div className="dialog-head"><div><h2>Change location</h2><p>Search for a country, city, or town near your farm.</p></div><button type="button" className="icon-button" aria-label="Close location search" onClick={() => searchDialog.current.close()}><X size={20} /></button></div>
         {searching && <SearchBox variant="dialog" location={location} busy={busy} onSearch={selectLocation} />}
         {error && <p className="dialog-error" role="alert">{error}</p>}
         <div className="dialog-cities">{LOCATIONS.map((item) => <button type="button" key={item.id} onClick={() => selectLocation(item)}><MapPin size={16} /><span>{item.name}<small>{locationLabel(item)}</small></span><ChevronRight size={15} /></button>)}</div>
