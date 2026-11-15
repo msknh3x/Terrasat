@@ -38,6 +38,11 @@ function seasonalMean(entries) {
   return sum(entries.map(({ value }, index) => value * days[index])) / sum(days);
 }
 
+function peakEntry(entries) {
+  if (!entries || !entries.length) return null;
+  return entries.reduce((best, entry) => entry.value > best.value ? entry : best, entries[0]);
+}
+
 function outsideRange(value, [min, max]) {
   return Math.max(min - value, 0, value - max);
 }
@@ -206,9 +211,100 @@ function buildRisks(climate, trends) {
 }
 
 function buildHealth(climate, risks) {
-  const heat = risks.find(({ id }) => id === 'heat');
+  const heat = risks.find(({ id }) => id === 'heat') || { level: 'unknown', signal: 'Monthly data unavailable' };
+  const flood = risks.find(({ id }) => id === 'flood');
+  const drought = risks.find(({ id }) => id === 'drought');
+
   const humidity = seasonalMean(normalsFor(climate, 'RH2M'));
+  const meanTemp = seasonalMean(normalsFor(climate, 'T2M'));
+  const peakHeat = peakEntry(normalsFor(climate, 'T2M_MAX'));
+  const peakRain = peakEntry(normalsFor(climate, 'PRECTOTCORR'));
+  const t2mNormals = normalsFor(climate, 'T2M');
+  const rhNormals = normalsFor(climate, 'RH2M');
+  const precNormals = normalsFor(climate, 'PRECTOTCORR');
+
+  // 1. Mosquito-borne disease (Dengue / Vector transmission climate suitability)
+  let vectorLevel = 'unknown';
+  let vectorSignal = 'Local surveillance needed';
+  let vectorDesc = 'Check public health advisories for local dengue activity and prevention guidance.';
+
+  if (meanTemp !== null && humidity !== null && t2mNormals && (rhNormals || precNormals)) {
+    const vectorMonths = ALL_MONTHS.filter((m) => {
+      const temp = t2mNormals[m - 1]?.value ?? 0;
+      const rain = precNormals?.[m - 1]?.value ?? 0;
+      const rh = rhNormals?.[m - 1]?.value ?? 0;
+      return temp >= 21 && (rain >= 50 || rh >= 55);
+    });
+
+    const peakVectorRain = peakRain?.value ?? 0;
+    const peakVectorTemp = peakHeat?.value ?? meanTemp;
+
+    if (vectorMonths.length >= 2 || (peakVectorRain >= 100 && peakVectorTemp >= 28)) {
+      vectorLevel = 'elevated';
+      const monthsLabel = vectorMonths.length >= 2
+        ? `${MONTH_NAMES[vectorMonths[0] - 1]}–${MONTH_NAMES[vectorMonths[vectorMonths.length - 1] - 1]}`
+        : `${MONTH_NAMES[(peakRain?.month ?? 7) - 1]}`;
+      vectorSignal = `${monthsLabel} · Elevated vector climate`;
+      vectorDesc = 'Warm temperatures and monsoon rainfall create favorable conditions for mosquito breeding and dengue transmission. Remove standing field water and check local public health alerts.';
+    } else if (vectorMonths.length >= 1 || (peakVectorTemp >= 24 && (humidity >= 45 || peakVectorRain >= 40))) {
+      vectorLevel = 'watch';
+      const activeMonth = vectorMonths.length >= 1
+        ? MONTH_NAMES[vectorMonths[0] - 1]
+        : MONTH_NAMES[(peakRain?.month ?? 7) - 1];
+      vectorSignal = `${activeMonth} · Seasonal vector watch`;
+      vectorDesc = 'Seasonal warmth and humidity support localized mosquito activity. Ensure field drainage and follow vector prevention measures.';
+    } else {
+      vectorLevel = 'limited';
+      vectorSignal = meanTemp < 18 ? 'Cool climate · Low vector activity' : `${Math.round(humidity)}% humidity · Low vector signal`;
+      vectorDesc = 'Historical thermal and precipitation ranges limit prolonged mosquito breeding cycles and virus incubation.';
+    }
+  }
+
+  // 2. Respiratory exposure (Particulate dust, low humidity, or high humidity stress)
+  let airLevel = 'unknown';
   const healthHumidity = humidity === null ? 'Humidity data unavailable' : `${Math.round(humidity)}% average humidity`;
+  let airSignal = healthHumidity;
+  let airDesc = 'Check local air-quality readings for dust, smoke, and particulate pollution.';
+
+  if (humidity !== null) {
+    const h = Math.round(humidity);
+    if (h < 35 || (drought?.level === 'elevated' && h < 45)) {
+      airLevel = 'elevated';
+      airSignal = `${h}% average humidity · Arid & dusty`;
+      airDesc = 'Very low humidity and dry soil conditions increase airborne dust, particulate matter, and respiratory strain during tillage and harvest. Use dust masks during field operations.';
+    } else if (h < 50 || h > 75) {
+      airLevel = 'watch';
+      airSignal = h < 50 ? `${h}% average humidity · Dry air sensitivity` : `${h}% average humidity · High humidity`;
+      airDesc = h < 50
+        ? 'Lower ambient humidity promotes particulate dust elevation during outdoor farm tasks. Check local air-quality readings.'
+        : 'High humidity can trap airborne allergens and heighten respiratory fatigue during warm field shifts.';
+    } else {
+      airLevel = 'limited';
+      airSignal = `${h}% average humidity · Moderate range`;
+      airDesc = 'Ambient humidity stays in a moderate range that helps suppress airborne agricultural dust. Check local readings during harvest.';
+    }
+  }
+
+  // 3. Water safety after flooding (Flood inundation runoff into wellheads)
+  let waterLevel = 'unknown';
+  let waterSignal = 'Local water testing needed';
+  let waterDesc = 'After flooding, follow local safe-water guidance and test affected wells before use.';
+
+  if (flood?.level && flood.level !== 'unknown') {
+    if (flood.level === 'elevated') {
+      waterLevel = 'elevated';
+      waterSignal = `${flood.signal} · High flood runoff`;
+      waterDesc = 'Elevated heavy-rain exposure indicates a significant risk of flood runoff contaminating shallow wells and irrigation sources. Test and disinfect affected drinking water supplies after floods.';
+    } else if (flood.level === 'watch') {
+      waterLevel = 'watch';
+      waterSignal = `${flood.signal} · Seasonal flood watch`;
+      waterDesc = 'Seasonal rain peaks can compromise unprotected wellheads and shallow aquifers. Maintain sealed wellheads and test well water if inundation occurs.';
+    } else {
+      waterLevel = 'limited';
+      waterSignal = `${flood.signal} · Low flood risk`;
+      waterDesc = 'Low historical rainfall peaks make flood-induced well contamination unlikely under standard conditions. Maintain routine well protection.';
+    }
+  }
 
   return [
     {
@@ -217,17 +313,17 @@ function buildHealth(climate, risks) {
       source: HEAT_SOURCE,
     },
     {
-      id: 'vector', name: 'Mosquito-borne disease', level: 'unknown', signal: 'Local surveillance needed',
-      description: 'Check public health advisories for local dengue activity and prevention guidance.',
+      id: 'vector', name: 'Mosquito-borne disease', level: vectorLevel, signal: vectorSignal,
+      description: vectorDesc,
       source: DENGUE_SOURCE,
     },
     {
-      id: 'air', name: 'Respiratory exposure', level: 'unknown', signal: healthHumidity,
-      description: 'Check local air-quality readings for dust, smoke, and particulate pollution.',
+      id: 'air', name: 'Respiratory exposure', level: airLevel, signal: airSignal,
+      description: airDesc,
     },
     {
-      id: 'water-safety', name: 'Water safety after flooding', level: 'unknown', signal: 'Local water testing needed',
-      description: 'After flooding, follow local safe-water guidance and test affected wells before use.',
+      id: 'water-safety', name: 'Water safety after flooding', level: waterLevel, signal: waterSignal,
+      description: waterDesc,
       source: WATER_SOURCE,
     },
     {
