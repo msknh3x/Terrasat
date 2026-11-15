@@ -15,6 +15,7 @@ const average = (values) => values.length ? values.reduce((sum, value) => sum + 
 
 export function makePowerUrl(lat, lon, startYear = START_YEAR, endYear = END_YEAR) {
   const [latitude, longitude] = pointCoordinates(lat, lon)
+  const apiKey = import.meta.env.VITE_NASA_API_KEY || 'wQWRPh6BPJHRdLpWdBgJdLLHPQH9rrLrqgkcghpF'
   const url = new URL(ENDPOINT)
   url.search = new URLSearchParams({
     parameters: REQUEST_PARAMETERS.join(','),
@@ -24,6 +25,7 @@ export function makePowerUrl(lat, lon, startYear = START_YEAR, endYear = END_YEA
     start: startYear,
     end: endYear,
     format: 'JSON',
+    api_key: apiKey,
   })
   return url
 }
