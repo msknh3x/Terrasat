@@ -18,21 +18,22 @@ export function solarPoint(date = new Date()) {
 }
 
 const TO_RADIANS = Math.PI / 180
-const DAY_NIGHT_PHASE = 74 * TO_RADIANS
-const OVERVIEW_LATITUDE = 28
+const DAY_NIGHT_PHASE = 48 * TO_RADIANS
 const wrapLongitude = (longitude) => ((longitude + 180) % 360 + 360) % 360 - 180
 
-export function dayNightView(date = new Date(), preferredLongitude = 68) {
+export const OVERVIEW_DRIFT = { degrees: 8, duration: 16000 }
+
+export function dayNightView(date = new Date(), preferredLongitude = -103) {
   const position = solarPoint(date)
-  const latitude = OVERVIEW_LATITUDE * TO_RADIANS
+  const overviewLatitude = Math.max(19, Math.min(32, position.lat + 47))
+  const latitude = overviewLatitude * TO_RADIANS
   const sunLatitude = position.lat * TO_RADIANS
   const offsetCosine = (Math.cos(DAY_NIGHT_PHASE) - Math.sin(latitude) * Math.sin(sunLatitude))
     / (Math.cos(latitude) * Math.cos(sunLatitude))
-  const offset = Math.acos(Math.max(-1, Math.min(1, offsetCosine))) / TO_RADIANS
-  const east = wrapLongitude(position.lng + offset)
-  const west = wrapLongitude(position.lng - offset)
-
-  // Choose the nearer of two mid-latitude camera positions with the same solar phase.
-  const lng = Math.abs(wrapLongitude(east - preferredLongitude)) <= Math.abs(wrapLongitude(west - preferredLongitude)) ? east : west
-  return { lat: OVERVIEW_LATITUDE, lng }
+  const maxOffset = Math.acos(Math.max(-1, Math.min(1, offsetCosine))) / TO_RADIANS
+  const preferredOffset = wrapLongitude(preferredLongitude - position.lng)
+  // Show the reference longitude whenever it lies within the illuminated view.
+  // The lighting itself always uses the Sun's current position.
+  const offset = Math.min(maxOffset, Math.abs(preferredOffset)) * Math.sign(preferredOffset)
+  return { lat: overviewLatitude, lng: wrapLongitude(position.lng + offset) }
 }

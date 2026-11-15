@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { dayNightView, solarPoint } from './globeSolar.js'
+import { dayNightView, OVERVIEW_DRIFT, solarPoint } from './globeSolar.js'
 
 const CDN = 'https://unpkg.com/three-globe@2.45.6/example/img'
 const BORDERS = 'https://raw.githubusercontent.com/vasturiano/react-globe.gl/master/example/datasets/ne_110m_admin_0_countries.geojson'
-const DAY = `${import.meta.env.BASE_URL}earth-surface.webp`
+const DAY = `${import.meta.env.BASE_URL}earth-surface-2002.webp`
 const NIGHT = `${import.meta.env.BASE_URL}earth-night-lights.webp`
-const NIGHT_STARTUP_LIMIT = 4000
+const NIGHT_STARTUP_LIMIT = 700
 const DEG = Math.PI / 180
 const TAU = Math.PI * 2
+const PIXEL_STRIDE = 6
 const KEY_ROTATIONS = { ArrowUp: [9, 0], ArrowDown: [-9, 0], ArrowLeft: [0, -12], ArrowRight: [0, 12] }
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value))
 const wrap = (longitude) => ((longitude + Math.PI) % TAU + TAU) % TAU - Math.PI
@@ -22,6 +23,15 @@ const DISPLAY = Uint8ClampedArray.from({ length: 4096 }, (_, i) => {
 
 function displayColor(value) {
   return DISPLAY[Math.min(4095, Math.max(0, (value * 4095 + .5) | 0))]
+}
+
+function cityExposure(light, darkness) {
+  return darkness * light / (1 + .57 * light)
+}
+
+function smoothstep(minimum, maximum, value) {
+  const t = clamp((value - minimum) / (maximum - minimum), 0, 1)
+  return t * t * (3 - 2 * t)
 }
 
 let boundariesPromise
@@ -141,21 +151,22 @@ function sampleTexture(map, u, v, channels, firstChannel = 0) {
   }
 }
 
-function alignTextureCoordinates(scene, view) {
-  if (scene.alignedLatitude === view.sinLat) return
-  const { pixels, textureCoordinates } = scene
-  for (let i = 0, j = 0; i < pixels.length; i += 5, j += 2) {
+function alignTextureCoordinates(grid, view) {
+  if (grid.alignedLatitude === view.sinLat) return
+  const { pixels, textureCoordinates } = grid
+  for (let i = 0, j = 0; i < pixels.length; i += PIXEL_STRIDE, j += 2) {
     const x = pixels[i + 1]
     const y = pixels[i + 2]
     const z = pixels[i + 3]
     textureCoordinates[j] = Math.atan2(x, z * view.cosLat - y * view.sinLat) / TAU
     textureCoordinates[j + 1] = .5 - Math.asin(clamp(y * view.cosLat + z * view.sinLat, -1, 1)) / Math.PI
   }
-  scene.alignedLatitude = view.sinLat
+  grid.alignedLatitude = view.sinLat
 }
 
 function rasterSurface(scene, view, sun) {
-  const { image, projection, pixels, textureCoordinates, day, night, cloud, citySample } = scene
+  const { projection, grid, day, night, cloud, citySample } = scene
+  const { image, pixels, textureCoordinates } = grid
   const { width, data } = image
   const { radius } = projection
   const invRadius = 2 / width
@@ -166,14 +177,15 @@ function rasterSurface(scene, view, sun) {
   const surface = scene.surfaceSample
   const sky = scene.cloudSample
   const longitude = view.lng / TAU + .5
-  alignTextureCoordinates(scene, view)
+  alignTextureCoordinates(grid, view)
 
-  for (let i = 0, j = 0; i < pixels.length; i += 5, j += 2) {
+  for (let i = 0, j = 0; i < pixels.length; i += PIXEL_STRIDE, j += 2) {
     const offset = pixels[i]
     const x = pixels[i + 1]
     const y = pixels[i + 2]
     const z = pixels[i + 3]
     const edge = pixels[i + 4]
+    const rimProfile = pixels[i + 5]
     const rotation = longitude + textureCoordinates[j]
     const u = rotation - Math.floor(rotation)
     const v = textureCoordinates[j + 1]
@@ -181,51 +193,56 @@ function rasterSurface(scene, view, sun) {
     const red = LINEAR[(surface[0] + .5) | 0]
     const green = LINEAR[(surface[1] + .5) | 0]
     const blue = LINEAR[(surface[2] + .5) | 0]
-    const water = clamp((surface[2] - surface[0] - 3) / 24, 0, 1)
-      * clamp((surface[2] - surface[1] - 2) / 16, 0, 1)
+    const luminance = red * .2126 + green * .7152 + blue * .0722
+    const water = smoothstep(.16, .53, (blue - red) / (blue + .004))
+      * smoothstep(.05, .35, (blue - green) / (blue + .004))
+      * (1 - smoothstep(.04, .21, luminance))
     const incidence = x * sun.x + y * sun.y + z * sun.z
     const daylight = Math.max(0, incidence)
-    const twilight = clamp((incidence + .13) * 4.2, 0, 1)
-    const irradiance = daylight * .77 + Math.sqrt(daylight) * .21
-    const exposure = .024 + .045 * twilight + irradiance
-    let directLight = 0
-    let diffuseLight = 0
+    const twilight = smoothstep(-.16, .20, incidence)
+    const darkness = smoothstep(.02, .20, -incidence)
+    const irradiance = daylight * .60 + Math.sqrt(daylight) * .33
+    const exposure = .013 + .042 * darkness + .155 * twilight + irradiance * .98
+    let cityRed = 0
+    let cityGreen = 0
+    let cityBlue = 0
     let reflectedLight = 0
     if (night && incidence < -.02) {
       sampleTexture(night, u, v, citySample)
       const core = citySample[0] / 255
       const neighborhood = citySample[1] / 255
       const halo = citySample[2] / 255
-      const darkness = clamp((-.02 - incidence) / .18, 0, 1)
-      const nightFactor = darkness * darkness * (3 - 2 * darkness)
-      // The atlas separates settlement cores from their immediate and broader glow.
-      directLight = (core * (.55 + .45 * core) * .88 + neighborhood * .46 * .24) * nightFactor
-      diffuseLight = (neighborhood * .46 * .76 + halo * .17) * nightFactor
-      reflectedLight = (neighborhood * .055 + halo * .027) * nightFactor
+      // Lift dim suburbs and road corridors while keeping the atlas's dark areas intact.
+      const nearbyGlow = neighborhood * (1.10 - .56 * neighborhood)
+      const directLight = core * (1.34 - .34 * core) * .91 + nearbyGlow * .29
+      const diffuseLight = nearbyGlow * .71 + halo * (.62 - .39 * halo)
+      cityRed = cityExposure(directLight + diffuseLight, darkness)
+      cityGreen = cityExposure(directLight * .89 + diffuseLight * .66, darkness)
+      cityBlue = cityExposure(directLight * .74 + diffuseLight * .39, darkness)
+      reflectedLight = (neighborhood * .15 + halo * .075) * darkness
     }
     const glintDot = x * highlightX + y * highlightY + z * highlightZ
-    const glare = water && daylight > 0 && glintDot > .8 ? water * glintDot ** 63 * daylight * .084 : 0
+    const glare = water && daylight > 0 && glintDot > .75
+      ? water * irradiance * (.036 * glintDot ** 32 + .022 * glintDot ** 76) : 0
     if (cloud) sampleTexture(cloud, u, v, sky, 3)
-    const cloudOpacity = cloud ? sky[0] * (.81 / 255) : 0
-    const surfaceTransmission = (1 - cloudOpacity) * (1 - cloudOpacity * .25)
-    const cloudSunlight = cloudOpacity * (.008 + .063 * twilight + irradiance * .90)
+    const cloudCover = cloud ? sky[0] / 255 : 0
+    const cloudOpacity = cloudCover * (.86 + .14 * smoothstep(.04, .88, cloudCover))
+    const surfaceTransmission = (1 - cloudOpacity) * (1 - cloudOpacity * .065 * twilight)
+    const cloudSunlight = cloudOpacity * (.009 + .019 * darkness + .195 * twilight + irradiance * .79)
     const cloudCityLight = cloudOpacity * reflectedLight
-    const pathLength = 1 - z
-    const rimShape = pathLength * pathLength * pathLength * pathLength
-    const limb = rimShape * rimShape * (.008 + .076 * twilight + .059 * daylight)
-    const scatter = .002 + twilight * .008
+    const limb = rimProfile * (.03 + .07 * darkness + .97 * smoothstep(-.14, .49, incidence)) * .74
+    const scatter = .0008 + twilight * .003
     const edgeAlpha = Math.min(1, (1 - edge) / invRadius + .46) * 255
 
-    const oceanRed = .0017 + red * .14
-    const oceanGreen = .0055 + green * .16
-    const oceanBlue = .014 + blue * .16
-    const r = (red + (oceanRed - red) * water) * exposure * 1.02
-    const g = (green + (oceanGreen - green) * water) * exposure
-    const b = (blue + (oceanBlue - blue) * water) * exposure * .97
+    // Preserve the natural texture over water and tint the deepest open ocean.
+    const deepWater = (1 - smoothstep(.008, .12, luminance) * .72) * water
+    const r = (red * (1 - water * .10) + .017 * deepWater) * exposure * (.64 + .39 * twilight)
+    const g = (green * (1 + water * .08) + .026 * deepWater) * exposure * (.76 + .25 * twilight)
+    const b = (blue * (1 + water * .22) + .105 * deepWater) * exposure * (1 - .025 * twilight)
 
-    data[offset] = displayColor((r + directLight + diffuseLight + glare * .81) * surfaceTransmission + cloudSunlight + cloudCityLight + scatter * .31 + limb * .27)
-    data[offset + 1] = displayColor((g + directLight * .83 + diffuseLight * .63 + glare * .91) * surfaceTransmission + cloudSunlight * 1.015 + cloudCityLight * .69 + scatter * .66 + limb * .59)
-    data[offset + 2] = displayColor((b + directLight * .63 + diffuseLight * .32 + glare) * surfaceTransmission + cloudSunlight * 1.035 + cloudCityLight * .36 + scatter * 1.28 + limb)
+    data[offset] = displayColor((r + cityRed + glare * .84) * surfaceTransmission + cloudSunlight * .99 + cloudCityLight + scatter * .30 + limb * .100)
+    data[offset + 1] = displayColor((g + cityGreen + glare * .93) * surfaceTransmission + cloudSunlight + cloudCityLight * .72 + scatter * .58 + limb * .23)
+    data[offset + 2] = displayColor((b + cityBlue + glare) * surfaceTransmission + cloudSunlight * 1.035 + cloudCityLight * .43 + scatter * 1.25 + limb * .61)
     data[offset + 3] = edgeAlpha
   }
 
@@ -239,26 +256,54 @@ function sizeProjection(scene, width, height) {
   scene.canvas.width = Math.round(width * pixelRatio)
   scene.canvas.height = Math.round(height * pixelRatio)
   scene.context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+  scene.context.imageSmoothingQuality = 'high'
 
   const radius = Math.min(width * .47, height * .46)
   scene.projection = { width, height, radius, x: width * .5, y: height * .50 }
-  const size = Math.min(540, Math.ceil(radius * 2 * Math.max(1, pixelRatio)))
+  scene.settledSize = Math.min(696, Math.ceil(radius * 2 * Math.max(1, pixelRatio)))
+  scene.grids.clear()
+  scene.grid = null
+}
+
+function prepareGrid(scene, mode) {
+  const cap = mode === 'drag' ? 380 : mode === 'reveal' ? 472 : 696
+  const size = Math.min(cap, scene.settledSize)
+  if (scene.grid?.image.width === size) return
+  let grid = scene.grids.get(size)
+  if (!grid) {
+    grid = makeGrid(scene.rasterContext, size)
+    scene.grids.set(size, grid)
+  }
+  scene.grid = grid
   scene.raster.width = size
   scene.raster.height = size
-  scene.image = scene.rasterContext.createImageData(size, size)
+}
 
-  const pixels = []
+function makeGrid(context, size) {
+  const pixels = new Float32Array(size * size * PIXEL_STRIDE)
+  let i = 0
   for (let row = 0; row < size; row += 1) {
     const y = 1 - (row + .5) * 2 / size
     for (let column = 0; column < size; column += 1) {
       const x = (column + .5) * 2 / size - 1
       const distance = x * x + y * y
-      if (distance <= 1) pixels.push((row * size + column) * 4, x, y, Math.sqrt(1 - distance), Math.sqrt(distance))
+      if (distance > 1) continue
+      const z = Math.sqrt(1 - distance)
+      pixels[i] = (row * size + column) * 4
+      pixels[i + 1] = x
+      pixels[i + 2] = y
+      pixels[i + 3] = z
+      pixels[i + 4] = Math.sqrt(distance)
+      pixels[i + 5] = Math.exp(-8 * z)
+      i += PIXEL_STRIDE
     }
   }
-  scene.pixels = new Float32Array(pixels)
-  scene.textureCoordinates = new Float32Array(pixels.length * 2 / 5)
-  scene.alignedLatitude = undefined
+  return {
+    image: context.createImageData(size, size),
+    pixels: pixels.subarray(0, i),
+    textureCoordinates: new Float32Array(i * 2 / PIXEL_STRIDE),
+    alignedLatitude: undefined,
+  }
 }
 
 function paintBoundaries(scene, view) {
@@ -290,6 +335,19 @@ function paintBoundaries(scene, view) {
   context.stroke()
 }
 
+function paintAtmosphere(context, x, y, radius, sun) {
+  const outer = radius * 1.013
+  const halo = context.createRadialGradient(x, y, radius * .99, x, y, outer)
+  const strength = .033 + smoothstep(-.7, .7, sun.z) * .12
+  halo.addColorStop(0, `rgba(94,145,235,${strength})`)
+  halo.addColorStop(.54, `rgba(91,138,237,${strength * .44})`)
+  halo.addColorStop(1, 'rgba(78,122,237,0)')
+  context.fillStyle = halo
+  context.beginPath()
+  context.arc(x, y, outer, 0, TAU)
+  context.fill()
+}
+
 function paint(scene, now) {
   const { context, projection, pose, marker, selected } = scene
   const { width, height, x, y, radius } = projection
@@ -303,6 +361,9 @@ function paint(scene, now) {
   const sun = project(scene.solar.point, view)
   context.clearRect(0, 0, width, height)
 
+  const rasterMode = scene.flight?.idle ? 'reveal' : scene.flight || scene.drag?.moved ? 'drag' : 'settled'
+  prepareGrid(scene, rasterMode)
+  paintAtmosphere(context, x, y, radius, sun)
   rasterSurface(scene, view, sun)
   paintBoundaries(scene, view)
 
@@ -315,11 +376,13 @@ function paint(scene, now) {
 }
 
 function redraw(scene) {
-  if (!scene || scene.frame !== null || !scene.visible || !scene.day || scene.waitingForNight || !scene.projection) return
+  if (!scene || scene.frame !== null || !scene.visible || !scene.day
+    || scene.waitingForNight || scene.waitingForCloud || !scene.projection) return
   scene.frame = requestAnimationFrame((now) => {
     scene.frame = null
     if (!scene.visible) return
-    if (now - scene.paintedAt < 42) {
+    const frameInterval = scene.flight?.idle ? 49 : 32
+    if (now - scene.paintedAt < frameInterval) {
       redraw(scene)
       return
     }
@@ -339,18 +402,22 @@ function redraw(scene) {
     if (!scene.ready) {
       scene.ready = true
       scene.didDraw()
+      if (!scene.reduced && !scene.selected) {
+        const target = { ...scene.pose, lng: wrap(scene.pose.lng + OVERVIEW_DRIFT.degrees * DEG) }
+        flyTo(scene, target, OVERVIEW_DRIFT.duration, true)
+      }
     }
     if (scene.flight) redraw(scene)
   })
 }
 
-function flyTo(scene, target, duration) {
+function flyTo(scene, target, duration, idle = false) {
   if (!scene) return
   if (scene.reduced || !scene.ready) {
     scene.pose = { ...target }
     scene.flight = null
   } else {
-    scene.flight = { initial: { ...scene.pose }, target, startedAt: performance.now(), duration }
+    scene.flight = { initial: { ...scene.pose }, target, startedAt: performance.now(), duration, idle }
   }
   redraw(scene)
 }
@@ -391,7 +458,7 @@ export default function CanvasGlobe({ selectedCity, onCityClick, onReady, onUnav
       canvas, context, raster, rasterContext, marker: markerRef.current,
       pose: overviewPose(), visible: true, ready: false, reduced: motion.matches, waitingForNight: true,
       surfaceSample: new Float32Array(3), cloudSample: new Float32Array(1), citySample: new Float32Array(3),
-      countries: [], frame: null, paintedAt: -Infinity,
+      countries: [], frame: null, paintedAt: -Infinity, grids: new Map(),
       didDraw: () => {
         setReady(true)
         onReady?.()
@@ -406,14 +473,31 @@ export default function CanvasGlobe({ selectedCity, onCityClick, onReady, onUnav
       redraw(scene)
     })
     resize.observe(host)
+    let intersectsViewport = true
+    let hiddenSince = null
+    const updateVisibility = () => {
+      const visible = intersectsViewport && document.visibilityState === 'visible'
+      if (scene.visible && !visible) hiddenSince = performance.now()
+      if (!scene.visible && visible && hiddenSince !== null) {
+        if (scene.flight) {
+          scene.flight.startedAt += performance.now() - Math.max(hiddenSince, scene.flight.startedAt)
+        }
+        hiddenSince = null
+      }
+      scene.visible = visible
+      if (visible) redraw(scene)
+    }
     const visibility = new IntersectionObserver(([entry]) => {
-      scene.visible = entry.isIntersecting
-      if (scene.visible) redraw(scene)
+      intersectsViewport = entry.isIntersecting
+      updateVisibility()
     })
     visibility.observe(host)
+    document.addEventListener('visibilitychange', updateVisibility)
+    updateVisibility()
     const updateMotion = () => {
       scene.reduced = motion.matches
-      if (scene.reduced && scene.flight) flyTo(scene, scene.flight.target, 0)
+      if (scene.reduced && scene.flight?.idle) scene.flight = null
+      else if (scene.reduced && scene.flight) flyTo(scene, scene.flight.target, 0)
       redraw(scene)
     }
     motion.addEventListener('change', updateMotion)
@@ -451,6 +535,7 @@ export default function CanvasGlobe({ selectedCity, onCityClick, onReady, onUnav
       window.clearTimeout(nightStartupDeadline)
       resize.disconnect()
       visibility.disconnect()
+      document.removeEventListener('visibilitychange', updateVisibility)
       motion.removeEventListener('change', updateMotion)
       window.clearInterval(daylight)
       if (scene.frame !== null) cancelAnimationFrame(scene.frame)
@@ -465,18 +550,34 @@ export default function CanvasGlobe({ selectedCity, onCityClick, onReady, onUnav
   useEffect(() => {
     const scene = sceneRef.current
     if (!scene) return
-    scene.cloud = null
-    redraw(scene)
-    if (!cloudUrl) return
-    const source = cloudSource ?? (cloudLive ? 'satellite' : 'illustrative')
-    onCloudStatus?.({ state: 'loading', source, timestamp: cloudTimestamp })
-    return requestTexture(cloudUrl, 1024, (texture) => {
-      scene.cloud = texture
+    if (!cloudUrl) {
+      scene.cloud = null
       redraw(scene)
+      return
+    }
+    const source = cloudSource ?? (cloudLive ? 'satellite' : 'illustrative')
+    scene.waitingForCloud = source === 'archive' && !scene.ready
+    const finishStartup = () => {
+      scene.waitingForCloud = false
+      redraw(scene)
+    }
+    const startupLimit = window.setTimeout(finishStartup, 950)
+    onCloudStatus?.({ state: 'loading', source, timestamp: cloudTimestamp })
+    const cancel = requestTexture(cloudUrl, 2048, (texture) => {
+      scene.cloud = texture
+      window.clearTimeout(startupLimit)
+      finishStartup()
       onCloudStatus?.({ state: 'ready', source, timestamp: cloudTimestamp })
     }, () => {
+      window.clearTimeout(startupLimit)
+      finishStartup()
       onCloudStatus?.({ state: 'unavailable', source })
     })
+    return () => {
+      cancel()
+      window.clearTimeout(startupLimit)
+      scene.waitingForCloud = false
+    }
   }, [cloudUrl, cloudLive, cloudSource, cloudTimestamp, onCloudStatus])
 
   useEffect(() => {
@@ -532,7 +633,9 @@ export default function CanvasGlobe({ selectedCity, onCityClick, onReady, onUnav
 
   function cancelGesture(event) {
     const scene = sceneRef.current
-    if (scene?.drag?.id === event.pointerId) scene.drag = null
+    if (scene?.drag?.id !== event.pointerId) return
+    scene.drag = null
+    redraw(scene)
   }
 
   function handleKey(event) {
@@ -540,6 +643,8 @@ export default function CanvasGlobe({ selectedCity, onCityClick, onReady, onUnav
     if (!scene?.ready) return
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault()
+      scene.flight = null
+      redraw(scene)
       onCityClick?.({ lat: scene.pose.lat / DEG, lng: scene.pose.lng / DEG })
     } else if (Object.hasOwn(KEY_ROTATIONS, event.key)) {
       event.preventDefault()

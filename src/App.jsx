@@ -30,7 +30,7 @@ const RISK_LEVELS = { elevated: 'Elevated', watch: 'Watch', limited: 'Limited si
 
 const Globe = lazy(() => import('./components/Globe.jsx'))
 const CanvasGlobe = lazy(() => import('./components/CanvasGlobe.jsx'))
-const WIDE_HERO = '(min-width: 768px)'
+const BASE_CLOUDS = { url: import.meta.env.BASE_URL + 'earth-clouds-archive.webp', source: 'archive' }
 const CLOUD_REFRESH = 15 * 60_000
 const SATELLITE_CLOCK = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
 
@@ -47,91 +47,6 @@ function globeRenderer() {
   }
   return 'canvas'
 }
-
-const HERO_GLOBE_STYLES = `
-.hero[data-globe-stage] {
-  min-height: clamp(380px, 33vw, 454px);
-  display: flex;
-  align-items: center;
-  background: linear-gradient(100deg, #142337 0%, #101b2a 33%, #080f1b 66%, #070d16 100%);
-  border-color: #293e56;
-}
-.hero .hero-globe {
-  position: absolute;
-  inset: 0 0 0 auto;
-  width: 52%;
-  overflow: hidden;
-  border-radius: 0 11px 11px 0;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .35s ease;
-}
-.hero-globe-loading {
-  position: absolute;
-  inset: 0 0 0 48%;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  justify-content: center;
-  color: #a3bccd;
-  font: 500 11px/1.35 var(--mono);
-  pointer-events: none;
-}
-.hero[data-globe-ready] .hero-globe { opacity: 1; pointer-events: auto; }
-.hero[data-globe-stage] .hero-body { width: min(48%, 610px); padding-block: 32px; }
-.hero[data-globe-stage] .hero-body > h1 { max-width: none; }
-.hero[data-globe-stage] .hero-kicker { border-color: transparent; background: none; padding-left: 0; }
-.hero .hero-globe canvas { display: block; touch-action: pan-y !important; }
-.hero[data-globe-stage] .hero-caption { position: static; margin-top: 14px; min-height: 25px; text-align: left; color: #b9cddc; }
-.hero[data-globe-stage] .hero-caption small { color: #94a9bc; }
-.hero[data-globe-stage] .hero-caption a { pointer-events: auto; }
-.hero-caption a:hover { text-decoration: underline; }
-.hero-globe .scene-tooltip, .hero-globe .fieldshift-globe-label {
-  color: var(--ink);
-  background: #0b1723ec;
-  border: 1px solid #80b8c573;
-  border-radius: 5px;
-  padding: 4px 7px;
-  font: 500 10px/1.3 var(--mono);
-  box-shadow: 0 3px 11px #09130bc0;
-  backdrop-filter: blur(4px);
-  white-space: nowrap;
-  pointer-events: none;
-}
-.hero-globe-toolbar {
-  position: absolute;
-  z-index: 1;
-  top: 15px;
-  right: 17px;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  pointer-events: none;
-}
-.hero-globe-hint {
-  display: block;
-  margin-top: 15px;
-  color: #a3bacb;
-  font: 400 10px/1.35 var(--mono);
-}
-.hero-globe-control {
-  min-height: 27px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 6px;
-  border: 1px solid #324a5c;
-  border-radius: 5px;
-  background: #101c2b;
-  color: #bdd4e3;
-  font: 500 10px/1.2 var(--mono);
-  pointer-events: auto;
-}
-.hero-globe-control[aria-pressed="true"] { background: #1b3346; color: #d0edf2; }
-.hero-globe-control:hover { border-color: #77a4bd; }
-@media (max-width: 767px) { .hero .hero-globe { display: none; } }
-@media (prefers-reduced-motion: reduce) { .hero .hero-globe { transition: none; } }
-`
 
 class GlobeBoundary extends React.Component {
   state = { unavailable: false }
@@ -203,48 +118,35 @@ function SearchBox({ location, busy, onSearch, variant = 'hero' }) {
   </form>
 }
 
-function Hero({ location, selectedCity, climate, onSearch, busy }) {
-  const [wideViewport, setWideViewport] = useState(() => window.matchMedia(WIDE_HERO).matches)
+function Hero({ location, selectedCity, onSearch, busy }) {
   const [globeReady, setGlobeReady] = useState(false)
-  const [renderer, setRenderer] = useState(() => wideViewport ? globeRenderer() : 'pending')
-  const [cloudsEnabled, setCloudsEnabled] = useState(true)
-  const [clouds, setClouds] = useState(null)
-  const [cloudState, setCloudState] = useState('loading')
-
-  useEffect(() => {
-    const media = window.matchMedia(WIDE_HERO)
-    const update = () => {
-      setWideViewport(media.matches)
-      if (media.matches) setRenderer((current) => current === 'pending' ? globeRenderer() : current)
-      else setGlobeReady(false)
-    }
-    media.addEventListener('change', update)
-    return () => media.removeEventListener('change', update)
-  }, [])
+  const [renderer, setRenderer] = useState(globeRenderer)
+  const [cloudMode, setCloudMode] = useState('archive')
+  const [satelliteClouds, setSatelliteClouds] = useState(null)
+  const [satelliteUnavailable, setSatelliteUnavailable] = useState(false)
+  const [cloudStatus, setCloudStatus] = useState(null)
 
   const markReady = useCallback(() => setGlobeReady(true), [])
   const markUnavailable = useCallback(() => {
     setGlobeReady(false)
-    setRenderer((current) => current === 'webgl' ? 'canvas' : 'photo')
+    setRenderer((current) => current === 'webgl' ? 'canvas' : 'unavailable')
   }, [])
   const selectPoint = useCallback(({ lat, lng }) => {
     if (Number.isFinite(lat) && Number.isFinite(lng)) onSearch({ lat, lng })
   }, [onSearch])
-  const mountGlobe = wideViewport && (renderer === 'webgl' || renderer === 'canvas')
-  const showGlobe = mountGlobe && globeReady
+
+  const canRenderGlobe = renderer !== 'unavailable'
+  const requestsSatellite = canRenderGlobe && cloudMode === 'satellite'
   const ActiveGlobe = renderer === 'canvas' ? CanvasGlobe : Globe
+  const clouds = cloudMode === 'off' ? null
+    : requestsSatellite && satelliteClouds && !satelliteUnavailable ? satelliteClouds : BASE_CLOUDS
 
   useEffect(() => {
-    if (!mountGlobe || !cloudsEnabled) return
+    if (!requestsSatellite) return
     const request = new AbortController()
-    let url
-    let displayedTimestamp = null
+    let activeUrl
+    let displayedTimestamp
     let updating = false
-
-    function releaseFrame() {
-      if (url) URL.revokeObjectURL(url)
-      url = null
-    }
 
     async function refresh() {
       if (updating || request.signal.aborted) return
@@ -253,17 +155,15 @@ function Hero({ location, selectedCity, climate, onSearch, busy }) {
         const { image, timestamp } = await fetchSatelliteClouds({ signal: request.signal })
         request.signal.throwIfAborted()
         if (timestamp === displayedTimestamp) return
-        releaseFrame()
-        url = URL.createObjectURL(image)
+        const previousUrl = activeUrl
+        activeUrl = URL.createObjectURL(image)
         displayedTimestamp = timestamp
-        setCloudState('loading')
-        setClouds({ url, timestamp, source: 'satellite' })
+        setSatelliteUnavailable(false)
+        setSatelliteClouds({ url: activeUrl, timestamp, source: 'satellite' })
+        if (previousUrl) URL.revokeObjectURL(previousUrl)
       } catch {
-        if (request.signal.aborted) return
-        releaseFrame()
-        displayedTimestamp = null
-        setCloudState('unavailable')
-        setClouds(null)
+        if (request.signal.aborted || activeUrl) return
+        setSatelliteUnavailable(true)
       } finally {
         updating = false
       }
@@ -273,7 +173,7 @@ function Hero({ location, selectedCity, climate, onSearch, busy }) {
       if (document.visibilityState === 'visible') refresh()
     }
 
-    setCloudState('loading')
+    setSatelliteUnavailable(false)
     refresh()
     const timer = window.setInterval(refreshVisible, CLOUD_REFRESH)
     document.addEventListener('visibilitychange', refreshVisible)
@@ -281,32 +181,26 @@ function Hero({ location, selectedCity, climate, onSearch, busy }) {
       request.abort()
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshVisible)
-      releaseFrame()
-      setClouds(null)
+      if (activeUrl) URL.revokeObjectURL(activeUrl)
+      setSatelliteClouds(null)
     }
-  }, [mountGlobe, cloudsEnabled])
+  }, [requestsSatellite])
 
-  const updateClouds = useCallback(({ state }) => setCloudState(state), [])
-  const satelliteVisible = cloudsEnabled && cloudState === 'ready' && clouds?.source === 'satellite'
-  const stamp = satelliteVisible ? SATELLITE_CLOCK.format(new Date(clouds.timestamp)) + ' UTC' : null
+  const updateClouds = useCallback((status) => {
+    setCloudStatus(status)
+    if (status.source === 'satellite' && status.state === 'unavailable') setSatelliteUnavailable(true)
+  }, [])
+  const satelliteVisible = requestsSatellite && !satelliteUnavailable && satelliteClouds
+    && cloudStatus?.source === 'satellite' && cloudStatus.state === 'ready'
+    && (!cloudStatus.timestamp || cloudStatus.timestamp === satelliteClouds.timestamp)
+  const stamp = satelliteVisible ? SATELLITE_CLOCK.format(new Date(satelliteClouds.timestamp)) + ' UTC' : ''
+  const archiveUnavailable = cloudStatus?.source === 'archive' && cloudStatus.state === 'unavailable'
   const globeCaption = satelliteVisible ? 'Satellite clouds · ' + stamp
-    : !cloudsEnabled ? 'Earth surface'
-      : cloudState === 'unavailable' ? 'Satellite clouds unavailable' : 'Loading satellite clouds'
+    : cloudMode === 'off' ? 'Clouds off'
+      : requestsSatellite ? (satelliteUnavailable ? 'Satellite clouds unavailable' : 'Loading satellite clouds…')
+        : archiveUnavailable ? 'NASA cloud composite unavailable' : 'NASA Blue Marble cloud composite'
 
-  return <section className="hero" data-globe-stage={mountGlobe || undefined} data-globe-ready={showGlobe || undefined} aria-labelledby="outlook-title">
-    <style>{HERO_GLOBE_STYLES}</style>
-    {!mountGlobe && <div className="hero-image" />}
-    {mountGlobe && !showGlobe && <div className="hero-globe-loading" role="status"><LoaderCircle size={15} className="spin" aria-hidden="true" /> Loading Earth…</div>}
-    {mountGlobe && <div className="hero-globe" role="group" aria-label="Interactive Earth globe" aria-hidden={!showGlobe}>
-      <GlobeBoundary key={renderer} onUnavailable={markUnavailable}>
-        <Suspense fallback={null}>
-          <ActiveGlobe selectedCity={selectedCity} onCityClick={selectPoint} onReady={markReady} onUnavailable={markUnavailable} clouds={cloudsEnabled ? clouds : null} onCloudStatus={updateClouds} />
-        </Suspense>
-      </GlobeBoundary>
-      {showGlobe && <div className="hero-globe-toolbar">
-        <button type="button" className="hero-globe-control" aria-pressed={cloudsEnabled} onClick={() => setCloudsEnabled((current) => !current)}><Cloud size={13} aria-hidden="true" /> Clouds</button>
-      </div>}
-    </div>}
+  return <section className="hero" aria-labelledby="outlook-title">
     <div className="hero-body">
       <div className="hero-kicker"><Satellite size={15} aria-hidden="true" /> Farm climate observatory</div>
       <h1 id="outlook-title">{location.name}</h1>
@@ -314,13 +208,38 @@ function Hero({ location, selectedCity, climate, onSearch, busy }) {
       <p>Use NASA climate records to see how heat and rainfall are shifting, then plan what to grow next.</p>
       <SearchBox location={location} busy={busy} onSearch={onSearch} />
       <div className="hero-quick"><span>Quick look</span>{LOCATIONS.filter((item) => item.id !== location.id).slice(0, 3).map((item) => <button type="button" key={item.id} onClick={() => onSearch(item)}>{item.name}<ChevronRight size={12} /></button>)}</div>
-      {mountGlobe && <small className="hero-globe-hint">Drag the globe to rotate. Select land to explore.</small>}
-      {mountGlobe && <div className="hero-caption">
-        <span>{globeCaption}</span>
-        <small>NASA Earth Observatory{satelliteVisible && <> · <a href="https://www.eumetsat.int/eumetsat-data-licensing" target="_blank" rel="noreferrer">Contains modified EUMETSAT data</a></>}</small>
+    </div>
+    <div className="hero-visual">
+      <div className="hero-globe-frame" data-ready={globeReady || undefined}>
+        {!globeReady && <div className="hero-globe-loading" role="status">
+          {canRenderGlobe && <LoaderCircle size={15} className="spin" aria-hidden="true" />}
+          {canRenderGlobe ? 'Loading Earth…' : 'Interactive Earth unavailable'}
+        </div>}
+        {canRenderGlobe && <div className="hero-globe" aria-hidden={!globeReady} inert={!globeReady}>
+          <GlobeBoundary key={renderer} onUnavailable={markUnavailable}>
+            <Suspense fallback={null}>
+              <ActiveGlobe selectedCity={selectedCity} onCityClick={selectPoint} onReady={markReady} onUnavailable={markUnavailable} clouds={clouds} onCloudStatus={updateClouds} />
+            </Suspense>
+          </GlobeBoundary>
+        </div>}
+        {globeReady && <label className="hero-globe-control">
+          <Cloud size={14} aria-hidden="true" />
+          <select aria-label="Globe clouds" value={cloudMode} onChange={(event) => setCloudMode(event.target.value)}>
+            <option value="archive">NASA clouds</option>
+            <option value="satellite">Latest satellite</option>
+            <option value="off">Clouds off</option>
+          </select>
+          <ChevronDown size={12} aria-hidden="true" />
+        </label>}
+      </div>
+      {canRenderGlobe && <div className="hero-globe-meta">
+        <span className="hero-globe-hint">Drag to rotate. Select land to explore.</span>
+        <div className="hero-caption">
+          <span role="status">{globeCaption}</span>
+          <small><a href="https://science.nasa.gov/earth/earth-observatory/the-blue-marble-true-color-global-imagery-at-1km-resolution/" target="_blank" rel="noreferrer">NASA Earth Observatory</a>{satelliteVisible && <> · <a href="https://www.eumetsat.int/eumetsat-data-licensing" target="_blank" rel="noreferrer">Contains modified EUMETSAT data</a></>}</small>
+        </div>
       </div>}
     </div>
-    {!mountGlobe && <div className="hero-caption"><span>{getPeriod(climate)} climate record</span><small>Illustrative aerial view</small></div>}
   </section>
 }
 
@@ -380,6 +299,7 @@ function Methods({ dialogRef, onClose }) {
     { href: 'https://creativecommons.org/licenses/by/4.0/', label: 'GeoNames data license' },
     { href: 'https://open-meteo.com/en/docs', label: 'Open-Meteo weather model' },
     { href: 'https://view.eumetsat.int/', label: 'EUMETSAT satellite imagery' },
+    { href: 'https://svs.gsfc.nasa.gov/4851/', label: 'NASA SVS star field' },
     ...advisoryLinks,
   ]
   return <dialog className="method-dialog" ref={dialogRef} onClose={onClose} onClick={(event) => {
@@ -389,7 +309,7 @@ function Methods({ dialogRef, onClose }) {
       <div className="dialog-head"><div><span className="context-label"><CircleHelp size={15} /> FieldShift</span><h2>Data & methodology</h2></div><button type="button" className="icon-button" aria-label="Close methodology" onClick={() => dialogRef.current.close()}><X size={20} /></button></div>
       <div className="method-body">
         <section><h3>Climate history</h3><p>NASA POWER agroclimatology monthly records cover 2001–2025. We aggregate complete years, sum monthly precipitation in millimetres, and fit linear trends with a two-sided 5% significance threshold. A weak trend can coexist with substantial year-to-year variation.</p></section>
-        <section><h3>Globe and current conditions</h3><p>The cloud layer uses a timestamped EUMETSAT infrared composite. The local conditions use Open-Meteo model estimates for the selected location. The daylight boundary follows the calculated position of the Sun in UTC. Night lighting uses NASA’s Black Marble satellite composite.</p></section>
+        <section><h3>Globe and current conditions</h3><p>The default cloud layer uses a NASA Blue Marble composite. Latest satellite mode shows timestamped EUMETSAT infrared imagery when available. The local conditions use Open-Meteo model estimates for the selected location. The daylight boundary follows the calculated position of the Sun in UTC. Night lighting uses NASA’s Black Marble satellite composite. The star field uses NASA’s Deep Star Maps, visualized by Ernie Wright.</p></section>
         <section><h3>Spatial resolution</h3><p>Climate data describe a regional grid cell around the selected location. SoilGrids provides modeled surface estimates. Use a field sample to confirm soil pH and texture before making field-level decisions.</p></section>
         <section><h3>Crops and seasonal timing</h3><p>The advisor screens growing-season climate, water assumptions and available soil measures. The rotation planner pairs Rabi and Kharif crops whose reference windows fit within one year. Planting windows vary by region, cultivar and farm management.</p></section>
         <section><h3>Finding a location</h3><p>The local GeoNames index resolves many city searches. OpenStreetMap supplies additional search results and place names for globe selections. Climate and soil load independently.</p></section>
@@ -483,7 +403,7 @@ export default function App() {
         <main className="workspace" id="main-content" tabIndex={-1}>
           {latestNotice && <div className="notice notice-error" role="alert"><ShieldAlert size={17} /><span>{latestNotice}</span><button className="icon-button" type="button" onClick={() => { if (reportError) setReportError(''); else setError('') }} aria-label="Dismiss error"><X size={16} /></button></div>}
           {view === 'overview' && <>
-            <Hero location={location} selectedCity={hasAnalyzed ? location : null} climate={climate} busy={busy} onSearch={selectLocation} />
+            <Hero location={location} selectedCity={hasAnalyzed ? location : null} busy={busy} onSearch={selectLocation} />
             <LocalAtmosphere location={location} />
             <div className="section-heading"><div><h2>Climate baseline</h2><p>{climate ? `Annual summaries · ${getPeriod(climate)}` : `Climate record for ${location.name}`}</p></div><span className="source-pill" data-loading={isClimateLoading || undefined}><i />{isClimateLoading ? 'Requesting NASA POWER' : climate?.mode === 'snapshot' ? 'NASA POWER archive' : climate ? 'NASA POWER' : 'Climate data unavailable'}</span></div>
             <MetricStrip climate={climate} trends={trends} selected={metric} onSelect={setMetric} isLoading={isClimateLoading} />
