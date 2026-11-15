@@ -6,7 +6,9 @@ FieldShift is an Earth-observation dashboard for exploring local climate history
 
 
 
-https://github.com/user-attachments/assets/803ae329-7662-4cfd-ba17-9c51c94d55c4
+
+https://github.com/user-attachments/assets/9afcf619-4d22-48c9-8219-2e745fe55658
+
 
 
 
