@@ -87,9 +87,23 @@ export async function fetchSoilData(lat, lon, { signal } = {}) {
 
   const key = url.toString()
   if (cache.has(key)) return cache.get(key)
-  const raw = await requestJson(url, { signal, timeout: 6500 })
-  const result = normalizeSoilResponse(raw, 'live', { lat: latitude, lon: longitude })
-  if (cache.size >= 20) cache.delete(cache.keys().next().value)
-  cache.set(key, result)
-  return result
+  try {
+    const raw = await requestJson(url, { signal, timeout: 12000 })
+    const result = normalizeSoilResponse(raw, 'live', { lat: latitude, lon: longitude })
+    if (cache.size >= 20) cache.delete(cache.keys().next().value)
+    cache.set(key, result)
+    return result
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (
+      error?.status === 404 ||
+      error instanceof SyntaxError ||
+      error?.name === 'SyntaxError' ||
+      error?.message?.includes('JSON') ||
+      error?.message?.includes('404')
+    ) {
+      return null
+    }
+    throw error
+  }
 }

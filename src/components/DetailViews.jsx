@@ -478,6 +478,7 @@ export function SoilView({ soil, location, soilStatus }) {
   const hasPoint = Number.isFinite(point?.lat) && Number.isFinite(point?.lon)
   const coordinate = (value, axis) => `${Math.abs(value).toFixed(3)}° ${axis[value < 0 ? 1 : 0]}`
   const cellLabel = hasPoint && `${coordinate(point.lat, ['N', 'S'])}, ${coordinate(point.lon, ['E', 'W'])}`
+  const hasSoil = Boolean(soil && Object.keys(soil).length > 0)
 
   return (
     <div className="fd-view">
@@ -485,7 +486,7 @@ export function SoilView({ soil, location, soilStatus }) {
         title="Soil profile"
         description={location?.name ? `Modeled topsoil properties near ${location.name}.` : 'Modeled topsoil properties for this location.'}
       />
-      {soil ? (
+      {hasSoil ? (
         <>
           <div className="fd-soil-summary">
             <span className="fd-icon"><Layers size={25} aria-hidden="true" /></span>
@@ -506,7 +507,7 @@ export function SoilView({ soil, location, soilStatus }) {
         <Empty icon={FlaskConical} title={soilStatus === 'loading' ? 'Requesting the soil profile' : 'Soil data unavailable'}>
           {soilStatus === 'loading'
             ? 'Waiting for modeled soil properties for this location.'
-            : 'SoilGrids has no accessible profile for this point right now. Climate and crop comparisons can still show the fields supported by available data.'}
+            : 'Soil data is not available for this location. Crop recommendations are based on climate data only.'}
         </Empty>
       )}
     </div>

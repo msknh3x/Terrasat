@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDownToLine, ArrowRight, CalendarDays, ChevronDown, ChevronRight, CircleHelp, CloudRain, Database, Droplet, ExternalLink, Globe2, LayoutGrid, Leaf, LoaderCircle, MapPin, Search, ShieldAlert, Sprout, Thermometer, Wind, X } from 'lucide-react'
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowDownToLine, ArrowRight, CalendarDays, ChevronDown, ChevronRight, CircleHelp, Cloud, CloudRain, Database, Droplet, ExternalLink, Globe2, LayoutGrid, Leaf, LoaderCircle, MapPin, Search, ShieldAlert, Sprout, Thermometer, Wind, X } from 'lucide-react'
 import { ClimateChart, getPeriod, MetricStrip } from './components/Climate.jsx'
 import { CalendarView, CropView, RiskView, SoilView } from './components/DetailViews.jsx'
+import LocalAtmosphere from './components/LocalAtmosphere.jsx'
 import { loadFieldData, getDemoFieldData } from './api/fieldData.js'
-import { geocodeCity } from './api/geocode.js'
+import { geocodeCity, reverseGeocode } from './api/geocode.js'
+import { fetchSatelliteClouds } from './api/satelliteClouds.js'
 import { DEFAULT_LOCATION, LOCATIONS, searchLocalLocations } from './data/locations.js'
 import { analyzeAllTrends } from './analysis/trends.js'
 import { ADVISORY_SOURCES, buildAdvisory } from './analysis/advisory.js'
@@ -19,6 +21,119 @@ const NAVIGATION = [
 
 const RISK_ICONS = { heat: Thermometer, drought: Droplet, flood: CloudRain, frost: Wind }
 const RISK_LEVELS = { elevated: 'Elevated', watch: 'Watch', limited: 'Limited signal', unknown: 'Insufficient data' }
+
+const Globe = lazy(() => import('./components/Globe.jsx'))
+const CanvasGlobe = lazy(() => import('./components/CanvasGlobe.jsx'))
+const WIDE_HERO = '(min-width: 768px)'
+const CLOUD_REFRESH = 15 * 60_000
+const CLOUD_FALLBACK = {
+  source: 'illustrative',
+  url: 'https://unpkg.com/three-globe@2.45.6/example/clouds/clouds.png',
+}
+const SATELLITE_CLOCK = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
+
+function globeRenderer() {
+  try {
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('webgl2', { antialias: false })
+    if (context) {
+      context.getExtension('WEBGL_lose_context')?.loseContext()
+      return 'webgl'
+    }
+  } catch {
+    // The photographic projection can render without a WebGL context.
+  }
+  return 'canvas'
+}
+
+const HERO_GLOBE_STYLES = `
+.hero .hero-globe {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 52%;
+  overflow: hidden;
+  border-radius: 0 11px 11px 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .35s ease;
+}
+.hero[data-globe-ready] {
+  background: radial-gradient(ellipse at 75% 46%, #22332a 0%, #141f19 38%, #192b21 88%);
+}
+.hero[data-globe-ready] .hero-image { opacity: 0; }
+.hero[data-globe-ready] .hero-globe { opacity: 1; pointer-events: auto; }
+.hero[data-globe-ready] .hero-body { width: min(56%, 610px); }
+.hero[data-globe-ready] .hero-body > h1 { max-width: none; }
+.hero .hero-globe canvas { display: block; touch-action: pan-y !important; }
+.hero[data-globe-ready] .hero-caption { z-index: 1; pointer-events: none; }
+.hero[data-globe-ready] .hero-caption a { pointer-events: auto; }
+.hero-caption a:hover { text-decoration: underline; }
+.hero-globe .scene-tooltip, .hero-globe .fieldshift-globe-label {
+  color: var(--ink);
+  background: #15231aec;
+  border: 1px solid #b7d68470;
+  border-radius: 5px;
+  padding: 4px 7px;
+  font: 500 10px/1.3 var(--mono);
+  box-shadow: 0 3px 11px #09130bc0;
+  backdrop-filter: blur(4px);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.hero-globe-toolbar {
+  position: absolute;
+  z-index: 1;
+  top: 13px;
+  right: 15px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  pointer-events: none;
+}
+.hero-globe-hint {
+  padding: 4px 6px;
+  border: 1px solid #49644980;
+  border-radius: 4px;
+  color: #cad7c5;
+  background: #15231acc;
+  font: 400 9px/1.2 var(--mono);
+  pointer-events: none;
+}
+.hero-cloud-toggle {
+  min-height: 27px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  border: 1px solid #496449;
+  border-radius: 5px;
+  background: #15231a;
+  color: #c5d5c3;
+  font: 500 10px/1.2 var(--mono);
+  pointer-events: auto;
+}
+.hero-cloud-toggle[aria-pressed="true"] { background: #293b29; color: #d6edaa; }
+.hero-cloud-toggle:hover { border-color: #83a16e; }
+@media (max-width: 980px) { .hero-globe-toolbar .hero-globe-hint { display: none; } }
+@media (max-width: 767px) { .hero .hero-globe { display: none; } }
+@media (prefers-reduced-motion: reduce) { .hero .hero-globe { transition: none; } }
+`
+
+class GlobeBoundary extends React.Component {
+  state = { unavailable: false }
+
+  static getDerivedStateFromError() {
+    return { unavailable: true }
+  }
+
+  componentDidCatch() {
+    this.props.onUnavailable()
+  }
+
+  render() {
+    return this.state.unavailable ? null : this.props.children
+  }
+}
 
 function getView() {
   return NAVIGATION.some((item) => item.id === window.location.hash.slice(1))
@@ -73,9 +188,118 @@ function SearchBox({ location, busy, onSearch, variant = 'hero' }) {
   </form>
 }
 
-function Hero({ location, climate, onSearch, busy }) {
-  return <section className="hero" aria-labelledby="outlook-title">
+function Hero({ location, selectedCity, climate, onSearch, busy }) {
+  const [wideViewport, setWideViewport] = useState(() => window.matchMedia(WIDE_HERO).matches)
+  const [globeReady, setGlobeReady] = useState(false)
+  const [renderer, setRenderer] = useState(() => wideViewport ? globeRenderer() : 'pending')
+  const [cloudsEnabled, setCloudsEnabled] = useState(true)
+  const [clouds, setClouds] = useState(null)
+  const [cloudState, setCloudState] = useState('loading')
+
+  useEffect(() => {
+    const media = window.matchMedia(WIDE_HERO)
+    const update = () => {
+      setWideViewport(media.matches)
+      if (media.matches) setRenderer((current) => current === 'pending' ? globeRenderer() : current)
+      else setGlobeReady(false)
+    }
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
+
+  const markReady = useCallback(() => setGlobeReady(true), [])
+  const markUnavailable = useCallback(() => {
+    setGlobeReady(false)
+    setRenderer((current) => current === 'webgl' ? 'canvas' : 'photo')
+  }, [])
+  const selectPoint = useCallback(({ lat, lng }) => {
+    if (!busy && Number.isFinite(lat) && Number.isFinite(lng)) onSearch({ lat, lng })
+  }, [busy, onSearch])
+  const mountGlobe = wideViewport && (renderer === 'webgl' || renderer === 'canvas')
+  const showGlobe = mountGlobe && globeReady
+  const ActiveGlobe = renderer === 'canvas' ? CanvasGlobe : Globe
+
+  useEffect(() => {
+    if (!mountGlobe || !cloudsEnabled) return
+    const request = new AbortController()
+    let url
+    let displayedTimestamp = null
+    let updating = false
+
+    function releaseFrame() {
+      if (url) URL.revokeObjectURL(url)
+      url = null
+    }
+
+    async function refresh() {
+      if (updating || request.signal.aborted) return
+      updating = true
+      try {
+        const { image, timestamp } = await fetchSatelliteClouds({ signal: request.signal })
+        request.signal.throwIfAborted()
+        if (timestamp === displayedTimestamp) return
+        releaseFrame()
+        url = URL.createObjectURL(image)
+        displayedTimestamp = timestamp
+        setCloudState('loading')
+        setClouds({ url, timestamp, source: 'satellite' })
+      } catch {
+        if (request.signal.aborted || displayedTimestamp === 'illustrative') return
+        releaseFrame()
+        displayedTimestamp = 'illustrative'
+        setCloudState('loading')
+        setClouds(CLOUD_FALLBACK)
+      } finally {
+        updating = false
+      }
+    }
+
+    function refreshVisible() {
+      if (document.visibilityState === 'visible') refresh()
+    }
+
+    setCloudState('loading')
+    refresh()
+    const timer = window.setInterval(refreshVisible, CLOUD_REFRESH)
+    document.addEventListener('visibilitychange', refreshVisible)
+    return () => {
+      request.abort()
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshVisible)
+      releaseFrame()
+      setClouds(null)
+    }
+  }, [mountGlobe, cloudsEnabled])
+
+  const updateClouds = useCallback(({ state, source }) => {
+    if (state === 'unavailable' && source === 'satellite') {
+      setCloudState('loading')
+      setClouds(CLOUD_FALLBACK)
+    } else {
+      setCloudState(state)
+    }
+  }, [])
+  const satelliteVisible = cloudsEnabled && cloudState === 'ready' && clouds?.source === 'satellite'
+  const stamp = satelliteVisible ? SATELLITE_CLOCK.format(new Date(clouds.timestamp)) + ' UTC' : null
+  const globeCaption = satelliteVisible ? 'Satellite clouds · ' + stamp
+    : !cloudsEnabled ? 'Cloud layer off'
+      : cloudState === 'ready' ? 'Illustrative cloud layer'
+        : cloudState === 'unavailable' ? 'Cloud layer unavailable' : 'Loading clouds'
+
+  return <section className="hero" data-globe-ready={showGlobe || undefined} aria-labelledby="outlook-title">
+    <style>{HERO_GLOBE_STYLES}</style>
     <div className="hero-image" />
+    {mountGlobe && <div className="hero-globe" role="group" aria-label="Interactive Earth globe" aria-hidden={!showGlobe}>
+      <GlobeBoundary key={renderer} onUnavailable={markUnavailable}>
+        <Suspense fallback={null}>
+          <ActiveGlobe selectedCity={selectedCity} onCityClick={selectPoint} onReady={markReady} onUnavailable={markUnavailable} clouds={cloudsEnabled ? clouds : null} onCloudStatus={updateClouds} />
+        </Suspense>
+      </GlobeBoundary>
+      {showGlobe && <div className="hero-globe-toolbar">
+        <span className="hero-globe-hint">Drag to rotate · Click land to analyze</span>
+        <button type="button" className="hero-cloud-toggle" aria-pressed={cloudsEnabled} onClick={() => setCloudsEnabled((current) => !current)}><Cloud size={13} /> Clouds</button>
+      </div>}
+    </div>}
     <div className="hero-body">
       <div className="hero-kicker"><span /> Farm climate outlook</div>
       <h1 id="outlook-title">{location.name}</h1>
@@ -84,8 +308,10 @@ function Hero({ location, climate, onSearch, busy }) {
       <SearchBox location={location} busy={busy} onSearch={onSearch} />
       <div className="hero-quick"><span>Explore</span>{LOCATIONS.filter((item) => item.id !== location.id).slice(0, 3).map((item) => <button type="button" key={item.id} disabled={busy} onClick={() => onSearch(item)}>{item.name}<ChevronRight size={12} /></button>)}</div>
     </div>
-    <div className="hero-map-marker" aria-hidden="true"><MapPin size={24} /><span>{location.name}</span></div>
-    <div className="hero-caption"><span>{getPeriod(climate)} climate record</span><small>Illustrative aerial view</small></div>
+    <div className="hero-caption">
+      <span>{showGlobe ? globeCaption : getPeriod(climate) + ' climate record'}</span>
+      <small>{satelliteVisible && showGlobe ? <a href="https://www.eumetsat.int/eumetsat-data-licensing" target="_blank" rel="noreferrer">Contains modified EUMETSAT data</a> : showGlobe ? 'NASA Blue Marble · Natural Earth' : 'Illustrative aerial view'}</small>
+    </div>
   </section>
 }
 
@@ -132,6 +358,8 @@ function Methods({ dialogRef, onClose }) {
     { href: 'https://power.larc.nasa.gov/docs/services/api/temporal/monthly/', label: 'NASA POWER monthly data' },
     { href: 'https://isric.org/explore/soilgrids/', label: 'ISRIC SoilGrids' },
     { href: 'https://www.openstreetmap.org/copyright', label: 'OpenStreetMap contributors' },
+    { href: 'https://open-meteo.com/en/docs', label: 'Open-Meteo weather model' },
+    { href: 'https://view.eumetsat.int/', label: 'EUMETSAT satellite imagery' },
     ...advisoryLinks,
   ]
   return <dialog className="method-dialog" ref={dialogRef} onClose={onClose} onClick={(event) => {
@@ -141,6 +369,7 @@ function Methods({ dialogRef, onClose }) {
       <div className="dialog-head"><div><span className="context-label"><CircleHelp size={15} /> FieldShift</span><h2>Data & methodology</h2></div><button type="button" className="icon-button" aria-label="Close methodology" onClick={() => dialogRef.current.close()}><X size={20} /></button></div>
       <div className="method-body">
         <section><h3>Climate history</h3><p>NASA POWER agroclimatology monthly records cover 2001–2025. We aggregate complete years, sum monthly precipitation in millimetres, and fit linear trends with a two-sided 5% significance threshold. A weak trend can coexist with substantial year-to-year variation.</p></section>
+        <section><h3>Globe and current conditions</h3><p>The cloud layer uses a timestamped EUMETSAT infrared composite. The local conditions use Open-Meteo model estimates for the selected location. The globe’s daylight line follows the estimated position of the Sun in UTC.</p></section>
         <section><h3>Spatial resolution</h3><p>Climate data describe a regional grid cell around the selected location. SoilGrids provides modeled surface estimates. Use a field sample to confirm soil pH and texture before making field-level decisions.</p></section>
         <section><h3>Crops and seasonal timing</h3><p>The advisor screens growing-season climate, water assumptions and available soil measures against a small crop library. Planting windows are Pakistan reference windows that vary with cultivar, region and management.</p></section>
         <section><h3>Risk and worker health</h3><p>Historical conditions identify exposure signals worth investigating. Use current local weather, river alerts and public health guidance for immediate decisions.</p></section>
@@ -162,7 +391,7 @@ export default function App() {
   const dataRequest = useRef(null)
   const methodDialog = useRef(null)
   const searchDialog = useRef(null)
-  const { location, dataset } = selection
+  const { location, dataset, hasAnalyzed } = selection
   const climate = dataset?.climate
   const soil = dataset?.soil
   const trends = useMemo(() => climate ? analyzeAllTrends(climate) : {}, [climate])
@@ -187,19 +416,33 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'instant' })
   }
 
-  async function runSearch(query) {
+  const runSearch = useCallback(async (query) => {
     dataRequest.current?.abort()
     const request = new AbortController()
     dataRequest.current = request
     setBusy(true)
     setError('')
     try {
-      const nextLocation = typeof query === 'string' ? await geocodeCity(query, { signal: request.signal }) : query
-      if (!nextLocation) throw new Error('Location not found. Try adding a region or country.')
+      const globePoint = Number.isFinite(query?.lat) && Number.isFinite(query?.lng) && !query.id
+      let nextLocation = query
+      if (globePoint) {
+        const lat = Number(query.lat.toFixed(4))
+        const lon = Number(query.lng.toFixed(4))
+        try {
+          nextLocation = await reverseGeocode(lat, lon, { signal: request.signal })
+        } catch (error) {
+          request.signal.throwIfAborted()
+          if (error.status !== 404) throw new Error('Could not look up that point. Try again or search for a city.', { cause: error })
+          nextLocation = null
+        }
+      } else if (typeof query === 'string') {
+        nextLocation = await geocodeCity(query, { signal: request.signal })
+      }
+      if (!nextLocation) throw new Error(globePoint ? 'No nearby place found. Select land or search for a city.' : 'Location not found. Try adding a region or country.')
       const nextDataset = await loadFieldData(nextLocation, { signal: request.signal })
       if (!nextDataset?.climate) throw new Error(`Climate data for ${nextLocation.name} is unavailable. Try again or select a launch location.`)
       if (request.signal.aborted) return false
-      setSelection({ location: nextLocation, dataset: nextDataset })
+      setSelection({ location: nextLocation, dataset: nextDataset, hasAnalyzed: true })
       searchDialog.current?.close()
       return true
     } catch (problem) {
@@ -208,7 +451,7 @@ export default function App() {
     } finally {
       if (!request.signal.aborted) setBusy(false)
     }
-  }
+  }, [])
 
   async function exportReport() {
     if (!climate) return
@@ -251,7 +494,8 @@ export default function App() {
         <main className="workspace" id="main-content" tabIndex={-1}>
           {error && !searching && <div className="notice notice-error" role="alert"><ShieldAlert size={17} /><span>{error}</span><button className="icon-button" type="button" onClick={() => setError('')} aria-label="Dismiss error"><X size={16} /></button></div>}
           {view === 'overview' && <>
-            <Hero location={location} climate={climate} busy={busy} onSearch={runSearch} />
+            <Hero location={location} selectedCity={hasAnalyzed ? location : null} climate={climate} busy={busy} onSearch={runSearch} />
+            <LocalAtmosphere location={location} />
             <div className="section-heading"><div><h2>Climate baseline</h2><p>Annual averages over {getPeriod(climate)}</p></div><span className="source-pill"><i />{climate?.mode === 'snapshot' ? 'NASA POWER archive' : climate ? 'NASA POWER' : 'Climate data unavailable'}</span></div>
             <MetricStrip climate={climate} trends={trends} selected={metric} onSelect={setMetric} />
             <div className="overview-grid"><ClimateChart climate={climate} trends={trends} selected={metric} onSelect={setMetric} /><SeasonalSignals advisory={advisory} location={location} navigate={navigate} /></div>

@@ -245,28 +245,20 @@ function isPakistan(location) {
 }
 
 export function buildAdvisory(climateData, trends, soilData, location, { irrigation = 'rainfed' } = {}) {
-  const localized = isPakistan(location);
-  const crops = localized
-    ? CROPS.map((crop) => scoreCrop(crop, climateData, trends, soilData, irrigation))
-      .sort((first, second) => (second.score ?? -1) - (first.score ?? -1) || first.name.localeCompare(second.name))
-    : [];
+  const crops = CROPS.map((crop) => scoreCrop(crop, climateData, trends, soilData, irrigation))
+    .sort((first, second) => (second.score ?? -1) - (first.score ?? -1) || first.name.localeCompare(second.name));
   const risks = buildRisks(climateData, trends);
   const health = buildHealth(climateData, risks);
   const calendar = crops.map(({ id, name, status, season, plantingMonths, growthMonths, harvestMonths, source }) => ({
     id, name, status, season, plantingMonths, growthMonths, harvestMonths, source,
   }));
-  const localCropNote = 'Screening scores compare historical growing conditions with crop reference ranges. '
-    + (soilData
-      ? 'Check cultivar, field moisture and a soil test before committing.'
-      : 'Scores use climate and the selected water source while the soil estimate is unavailable.');
 
   return {
     crops, risks, health, calendar,
-    cropNote: localized
-      ? localCropNote
-      : 'The crop screening library currently covers Pakistan. Climate records are available for this location.',
-    calendarNote: localized
-      ? 'Pakistan reference windows vary by district, cultivar and water access. Confirm dates with local agricultural extension.'
-      : 'Planting and harvest windows are available for Pakistan.',
+    cropNote: 'Screening scores compare historical growing conditions with crop reference ranges. '
+      + (soilData
+        ? 'Check cultivar, field moisture and a soil test before committing.'
+        : 'Scores use climate and the selected water source while the soil estimate is unavailable.'),
+    calendarNote: 'Planting and harvest windows are reference ranges. Confirm dates with local agricultural extension services.',
   };
 }
