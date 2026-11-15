@@ -1,5 +1,5 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDownToLine, ArrowRight, CalendarDays, ChevronDown, ChevronRight, CircleHelp, Cloud, CloudRain, Database, Droplet, ExternalLink, GitCompareArrows, LayoutGrid, LoaderCircle, MapPin, Orbit, Satellite, Search, ShieldAlert, Sprout, Thermometer, Wind, X } from 'lucide-react'
+import { ArrowDownToLine, ArrowRight, CalendarDays, ChevronDown, ChevronRight, CircleHelp, Cloud, CloudRain, Database, Droplet, ExternalLink, GitCompareArrows, LayoutGrid, Leaf, LoaderCircle, MapPin, Satellite, Search, ShieldAlert, Sprout, Thermometer, Wind, X } from 'lucide-react'
 import { ClimateChart, getPeriod, MetricStrip } from './components/Climate.jsx'
 import { CalendarView, CropView, RiskView, SoilView } from './components/DetailViews.jsx'
 import LocalAtmosphere from './components/LocalAtmosphere.jsx'
@@ -458,7 +458,7 @@ export default function App() {
     <a href="#main-content" className="skip-link" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus() }}>Skip to content</a>
     <div className="app">
       <aside className="side-rail">
-        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); navigate('overview') }}><span className="brand-icon"><Orbit size={25} strokeWidth={1.55} /></span><span>FieldShift<small>Earth observation</small></span></a>
+        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); navigate('overview') }}><span className="brand-icon"><Leaf size={22} strokeWidth={2.3} /></span><span>FieldShift<small>Earth observation</small></span></a>
         <div className="rail-main">
           <nav className="main-nav" aria-label="Dashboard">
             {NAVIGATION_GROUPS.map((group) => <div className="nav-group" key={group.label}>
