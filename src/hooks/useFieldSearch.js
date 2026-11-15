@@ -7,13 +7,14 @@ import { DEFAULT_LOCATION, LOCATIONS } from '../data/locations.js'
 const LOOKUP_CACHE_LIMIT = 60
 
 function startSelection(location, hasAnalyzed) {
-  const bundled = getDemoFieldData(location)
+  const isCountry = Boolean(location?.isCountry)
+  const bundled = !isCountry ? getDemoFieldData(location) : null
   return {
     location,
     dataset: bundled ?? { climate: null, soil: null, warnings: [] },
-    hasAnalyzed,
-    climateStatus: bundled ? 'ready' : 'loading',
-    soilStatus: bundled ? (bundled.soil ? 'ready' : 'unavailable') : 'loading',
+    hasAnalyzed: isCountry ? false : hasAnalyzed,
+    climateStatus: isCountry ? 'idle' : bundled ? 'ready' : 'loading',
+    soilStatus: isCountry ? 'idle' : bundled ? (bundled.soil ? 'ready' : 'unavailable') : 'loading',
     climateError: '',
   }
 }
@@ -24,7 +25,7 @@ function globePoint(query) {
   return { lat, lon }
 }
 
-async function resolveLocation(query, point, signal) {
+async function resolveLocation(query, point, signal, activeCountry) {
   if (point) {
     let location
     try {
@@ -35,18 +36,27 @@ async function resolveLocation(query, point, signal) {
         throw new Error('Could not look up that point. Try again or search for a city.', { cause: error })
       }
     }
-    if (!location) throw new Error('No nearby place found. Select land or search for a city.')
+    if (!location) throw new Error('No matching country, city, or town found.')
     return location
   }
 
   if (typeof query === 'string') {
-    const location = await geocodeCity(query, { signal })
-    if (!location) throw new Error('Location not found. Try adding a region or country.')
+    const location = await geocodeCity(query, { signal, countryCode: activeCountry?.countryCode })
+    if (!location) throw new Error('No matching country, city, or town found.')
+    if (location.ambiguous) {
+      const error = new Error('Multiple locations match this name. Please select one from the choices.')
+      error.ambiguous = true
+      error.choices = location.choices
+      throw error
+    }
     return location
   }
 
-  if (Number.isFinite(query?.lat) && Number.isFinite(query?.lon)) return query
-  throw new Error('Location not found. Try adding a region or country.')
+  if (query && typeof query === 'object' && Number.isFinite(query?.lat) && Number.isFinite(query?.lon)) {
+    return query
+  }
+
+  throw new Error('No matching country, city, or town found.')
 }
 
 function lookupKey(query) {
@@ -84,16 +94,15 @@ export function useFieldSearch() {
       const point = globePoint(query)
       const key = lookupKey(query)
       const cachedLocation = lookupCache.current.get(key)
+      const activeCountry = selection.location?.isCountry ? selection.location : null
       const alreadyBundled = point && LOCATIONS.some(({ lat, lon }) => point.lat === lat && point.lon === lon)
       const prefetched = point && !alreadyBundled ? requestFieldSources(point, { signal: request.field.signal }) : null
       if (prefetched) {
-        // These requests can finish before the name lookup. Attach rejection handlers
-        // now, then use the results once the point has been accepted.
         prefetched.climate.catch(() => {})
         prefetched.ground.catch(() => {})
       }
 
-      const location = cachedLocation ?? await resolveLocation(query, point, signal)
+      const location = cachedLocation ?? await resolveLocation(query, point, signal, activeCountry)
       signal.throwIfAborted()
       if (key && !cachedLocation) {
         if (lookupCache.current.size >= LOOKUP_CACHE_LIMIT) {
@@ -128,18 +137,18 @@ export function useFieldSearch() {
         )
       }
 
-      return true
+      return location
     } catch (problem) {
       request.field.abort()
-      if (!signal.aborted) setError(problem?.message || 'Location data could not be loaded. Please try again.')
-      return false
+      if (!signal.aborted) setError(problem?.message || 'No matching country, city, or town found.')
+      return problem?.ambiguous ? { ambiguous: true, choices: problem.choices } : false
     } finally {
       if (lookupRequest.current === request) {
         lookupRequest.current = null
         setBusy(false)
       }
     }
-  }, [])
+  }, [selection.location])
 
   return { ...selection, busy, error, setError, runSearch }
 }
